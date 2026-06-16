@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+/* ප්‍රින්ට් කරද්දී ක්‍රියාත්මක වන Styles */
+@media print {
+  body {
+    background-color: white;
+    color: black;
+  }
+  .print\:hidden {
+    display: none !important; /* මුළු UI එකම හංගයි */
+  }
+  .print\:block {
+    display: block !important; /* බිල්පත පමණක් පෙන්වයි */
+  }
+}
