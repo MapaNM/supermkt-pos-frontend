@@ -479,7 +479,7 @@ function App() {
               <div className="w-full lg:w-3/5 p-4 bg-white flex flex-col justify-between shadow-inner border-r border-gray-200">
                 <div className="flex flex-col h-full overflow-hidden">
                   <div className="flex justify-between items-center border-b pb-2 mb-3">
-                    <h2 className="text-lg font-black text-slate-800 flex items-center gap-2">🛒 වත්මන් ბිල්පත <span className="bg-slate-200 text-slate-700 text-xs px-2 py-0.5 rounded-full">{cart.length} Items</span></h2>
+                    <h2 className="text-lg font-black text-slate-800 flex items-center gap-2">🛒 වත්මන් බිල්පත <span className="bg-slate-200 text-slate-700 text-xs px-2 py-0.5 rounded-full">{cart.length} Items</span></h2>
                     <button onClick={() => { setCart([]); showToast("බිල්පත හිස් කලා"); }} className="text-xs text-red-500 hover:underline font-bold">බිල හිස් කරන්න (Clear All)</button>
                   </div>
 
@@ -551,11 +551,11 @@ function App() {
                     ) : paymentMethod === "Cash" ? (
                       <div className="grid grid-cols-2 gap-3 bg-emerald-50/50 p-1 rounded-lg">
                         <div>
-                          <label className="text-[11px] font-bold text-emerald-800 block mb-1">💵 ලැබුණු Cash මුදල:</label>
+                          <label className="text-[11px] font-bold text-emerald-800 block mb-1">💵 ලැබුණු මුදල (Cash):</label>
                           <input type="number" placeholder="0.00" value={cashReceived} onChange={(e) => setCashReceived(e.target.value)} className="w-full p-2 border rounded text-sm font-black text-emerald-700 bg-white" />
                         </div>
                         <div>
-                          <label className="text-[11px] font-bold text-emerald-800 block mb-1">🔄 ඉතිරි Balance මුදල:</label>
+                          <label className="text-[11px] font-bold text-emerald-800 block mb-1">🔄 ඉතිරි මුදල (Balance):</label>
                           <div className="p-2 bg-white border border-emerald-300 rounded-lg font-black text-sm text-red-600 text-center">රු. {balanceAmount.toFixed(2)}</div>
                         </div>
                       </div>
@@ -736,7 +736,7 @@ function App() {
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-white text-center font-bold">
                     <div className="bg-emerald-600 p-4 rounded-xl shadow"><div>මුළු ආදායම</div><div className="text-2xl font-black mt-1">රු. {salesSummary.totalRevenue?.toFixed(2)}</div></div>
                     <div className="bg-teal-600 p-4 rounded-xl shadow"><div>ශුද්ධ ලාභය</div><div className="text-2xl font-black mt-1">රු. {salesSummary.totalProfit?.toFixed(2)}</div></div>
-                    <div className="bg-slate-800 p-4 rounded-xl shadow"><div>මුළු ඉන්වොයිසි</div><div className="text-2xl font-black mt-1">{salesSummary.totalSalesCount}</div></div>
+                    <div className="bg-slate-800 p-4 rounded-xl shadow"><div>Total Invoices</div><div className="text-2xl font-black mt-1">{salesSummary.totalSalesCount}</div></div>
                   </div>
                   <div className="bg-white p-4 rounded-xl border shadow-sm">
                     <table className="w-full text-left text-xs">
@@ -872,7 +872,7 @@ function App() {
                 </div>
                 {discPercent > 0 && (
                   <div className="text-[9px] text-red-600 font-bold italic pl-1">
-                    ↳ ({discPercent}% විශේෂ වට්ටම අඩු විය)
+                    ↳ ({discPercent}% විශේෂ වට්ටම්)
                   </div>
                 )}
               </div>
@@ -896,7 +896,7 @@ function App() {
           
           {paymentMethod === "Credit" && (
             <div className="flex justify-between text-red-600 font-bold border-t border-dashed pt-0.5">
-              <span>ණය පොතට (Credit Due)</span>
+              <span>ගෙවීමට ඇති මුදල</span>
               <span>රු. {(calculateTotal() - (amountPaid === "" ? 0 : parseFloat(amountPaid))).toFixed(2)}</span>
             </div>
           )}
@@ -918,7 +918,7 @@ function App() {
           return sum + (totalSavedPerItem * parseFloat(item.qty || 0));
         }, 0) > 0 && (
           <div className="mt-3 p-1.5 border border-black border-dashed text-center bg-slate-50">
-            <div className="font-bold text-[10px]">ඔබට ලැබුණු මුළු ලාභය (Total Savings)</div>
+            <div className="font-bold text-[10px]">ඔබට ලැබුණු මුළු ලාභය</div>
             <div className="font-black text-xs mt-0.5">
               Rs.{cart.reduce((sum, item) => {
                 const discP = parseFloat(item.discountPercent || item.discount) || 0;
