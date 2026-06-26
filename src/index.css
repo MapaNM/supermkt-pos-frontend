@@ -13,3 +13,16 @@
     display: block !important; /* බිල්පත පමණක් පෙන්වයි */
   }
 }
+
+@media print {
+  html, body {
+    height: auto !important;
+    overflow: visible !important;
+  }
+  .print\:hidden {
+    display: none !important;
+  }
+  .print\:block {
+    display: block !important;
+  }
+}
