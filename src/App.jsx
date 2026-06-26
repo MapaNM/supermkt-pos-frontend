@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
-import { db } from "./db";
 
 // 🛠️ HOSTING CONFIGURATION: Localhost සහ Render.com දෙකටම ගැලපෙන සේ පොදු URL එකක් සාදා ඇත
 // Render එකට දැමූ පසු "http://localhost:5008/api" වෙනුවට Render Live URL එක දමන්න
@@ -81,43 +80,6 @@ function App() {
     }
   }, [user]);
 
-  useEffect(() => {
-    const handleOnline = async () => {
-      showToast("🔄 අන්තර්ජාලය නැවත ලැබුණි! දත්ත සමගාමී (Sync) කරයි...", "warning");
-      
-      // Pending බිල්පත් ලැයිස්තුව ලබා ගනී
-      const pendingSales = await db.offlineSales.where('status').equals('pending').toArray();
-      
-      if (pendingSales.length === 0) return;
-
-      for (const sale of pendingSales) {
-        try {
-          // එකින් එක සර්වර් එකට යවයි
-          await axios.post(`${API_BASE_URL}/products/checkout`, {
-            cartItems: sale.cartItems,
-            cashierName: sale.cashierName,
-            paymentMethod: sale.paymentMethod,
-            customerId: sale.customerId,
-            cashReceived: sale.cashReceived,
-            balanceAmount: sale.balanceAmount,
-            amountPaid: sale.amountPaid,
-            amountDue: sale.amountDue
-          });
-          
-          // සාර්ථක නම් Local DB එකෙන් මකා දමයි
-          await db.offlineSales.delete(sale.id);
-        } catch (err) {
-          console.error("ბიල Sync කිරීම අසාර්ථකයි:", err);
-        }
-      }
-      showToast("✅ සියලුම Offline බිල්පත් සාර්ථකව සර්වර් එකට යැවුවා! 🎉");
-      fetchProducts(); 
-    };
-
-    window.addEventListener('online', handleOnline);
-    return () => window.removeEventListener('online', handleOnline);
-  }, [products]);
-
   // Live Balance Calculation
   useEffect(() => {
     const total = calculateTotal();
@@ -158,27 +120,12 @@ function App() {
   }, [products, cart, activeTab, user]);
 
   const fetchProducts = async () => {
-  try {
-    const response = await axios.get(`${API_BASE_URL}/products`);
-    setProducts(response.data);
-    setLoading(false);
-
-    // 🛠️ UPDATED: Online ආපු ගමන් බඩු ටික local DB එකටත් දානවා Offline පාවිච්චි කරන්න
-    await db.products.clear(); // පරණ දත්ත මකනවා
-    await db.products.bulkAdd(response.data); // අලුත් බඩු ටික දානවා
-    
-  } catch (error) {
-    console.log("Backend එකට සම්බන්ධ විය නොහැක. Offline දත්ත පරීක්ෂා කරයි... ⚠️");
-    
-    // 🛠️ UPDATED: සර්වර් Error නම් (Offline නම්) Local DB එකෙන් බඩු ටික ගන්නවා
-    const localProducts = await db.products.toArray();
-    if (localProducts.length > 0) {
-      setProducts(localProducts);
-      showToast("පද්ධතිය Offline ක්‍රියාත්මක වේ! 📴", "warning");
-    }
-    setLoading(false);
-  }
-};
+    try {
+      const response = await axios.get(`${API_BASE_URL}/products`);
+      setProducts(response.data);
+      setLoading(false);
+    } catch (error) { setLoading(false); }
+  };
 
   const fetchSalesSummary = async () => {
     try {
@@ -353,70 +300,48 @@ function App() {
       return showToast("හිඟ මුදලක් පවතී! කරුණාකර පාරිභෝගිකයෙකු සම්බන්ධ කරන්න. 👤", "warning");
     }
 
-    // Backend එකට සහ Offline DB එකට යැවීමට පොදුවේ සකස් කරගත් Cart Object එක
-    const preparedCartItems = cart.map(item => {
-      const discP = parseFloat(item.discountPercent || item.discount) || 0;
-      return {
-        ...item,
-        _id: item.isTemporary ? null : item._id,
-        discount: (parseFloat(item.price) * discP) / 100 
-      };
-    });
-
-    const checkoutData = {
-      cartItems: preparedCartItems,
-      cashierName: user.username,
-      paymentMethod: paymentMethod,
-      customerId: selectedCustomer ? selectedCustomer._id : null,
-      cashReceived: paymentMethod === "Cash" ? receivedCash : 0,
-      balanceAmount: paymentMethod === "Cash" ? balanceAmount : 0,
-      amountPaid: paid, 
-      amountDue: total - paid 
-    };
-
     try {
-      // 🌐 ONLINE MODE: සර්වර් එකට දත්ත යැවීමට උත්සාහ කරයි
-      await axios.post(`${API_BASE_URL}/products/checkout`, checkoutData);
-      
+      await axios.post(`${API_BASE_URL}/products/checkout`, {
+        cartItems: cart.map(item => {
+          const discP = parseFloat(item.discountPercent || item.discount) || 0;
+          return {
+            ...item,
+            _id: item.isTemporary ? null : item._id, // Backend එකට null ලෙස යවයි
+            discount: (parseFloat(item.price) * discP) / 100 
+          };
+        }),
+        cashierName: user.username,
+        paymentMethod: paymentMethod,
+        customerId: selectedCustomer ? selectedCustomer._id : null,
+        cashReceived: paymentMethod === "Cash" ? receivedCash : 0,
+        balanceAmount: paymentMethod === "Cash" ? balanceAmount : 0,
+        amountPaid: paid, 
+        amountDue: total - paid 
+      });
       window.print();
-      resetBillingUI();
+      setCart([]);
+      setSelectedCustomer(null);
+      setSearchPhone("");
+      setCashReceived("");
+      setAmountPaid(""); 
+      setBalanceAmount(0);
+      setPaymentMethod("Cash");
       showToast("ඉන්වොයිසිය සාර්ථකව මුද්‍රණය කලා! 🖨️✨");
       fetchProducts();
       fetchCustomers();
-
-    } catch (error) {
-      // 📴 OFFLINE MODE: ඉන්ටර්නෙට් නැතිනම් හෝ සර්වර් එක Down නම් ක්‍රියාත්මක වේ
-      if (!navigator.onLine || error.message === "Network Error") {
-        try {
-          // IndexedDB එකට "pending" එකක් ලෙස බිල ඇතුලත් කරයි
-          await db.offlineSales.add({
-            ...checkoutData,
-            createdAt: new Date().toISOString(),
-            status: "pending"
-          });
-
-          window.print(); // ඉන්ටර්නෙට් නැතත් බිල මුද්‍රණය වේ
-          resetBillingUI();
-          showToast("⚠️ ඉන්ටර්නෙට් නොමැත! බිල ආරක්ෂිතව බ්‍රවුසර් එකේ සේව් කලා. 📴", "warning");
-          
-        } catch (dbError) {
-          showToast("Local Database එකට සේව් කිරීම අසාර්ථකයි!", "error");
-        }
-      } else {
-        showToast("Checkout අසාර්ථකයි!", "error");
-      }
-    }
+    } catch (error) { showToast("Checkout අසාර්ථකයි!", "error"); }
   };
 
-  // 🛠️ Helper Function: බිලක් අවසන් වූ පසු UI එක Reset කරන කොටස (Code එක පිරිසිදුව තබා ගැනීමට)
-  const resetBillingUI = () => {
-    setCart([]);
-    setSelectedCustomer(null);
-    setSearchPhone("");
-    setCashReceived("");
-    setAmountPaid(""); 
-    setBalanceAmount(0);
-    setPaymentMethod("Cash");
+  const handleVoidSale = async (saleId) => {
+    if (window.confirm("මෙම බිල්පත අවලංගු කිරීමට අවශ්‍යද?")) {
+      try {
+        await axios.post(`${API_BASE_URL}/products/void-sale/${saleId}`);
+        showToast("බිල්පත සාර්ථකව අවලංගු කලා!");
+        fetchProducts();
+        fetchSalesSummary();
+        fetchCustomers();
+      } catch (error) { showToast("අසාර්ථකයි!", "error"); }
+    }
   };
 
   // --- LOGIN LOGIC ---
@@ -554,7 +479,7 @@ function App() {
               <div className="w-full lg:w-3/5 p-4 bg-white flex flex-col justify-between shadow-inner border-r border-gray-200">
                 <div className="flex flex-col h-full overflow-hidden">
                   <div className="flex justify-between items-center border-b pb-2 mb-3">
-                    <h2 className="text-lg font-black text-slate-800 flex items-center gap-2">🛒 වත්මන් බිල්පත <span className="bg-slate-200 text-slate-700 text-xs px-2 py-0.5 rounded-full">{cart.length} Items</span></h2>
+                    <h2 className="text-lg font-black text-slate-800 flex items-center gap-2">🛒 වත්මන් ბිල්පත <span className="bg-slate-200 text-slate-700 text-xs px-2 py-0.5 rounded-full">{cart.length} Items</span></h2>
                     <button onClick={() => { setCart([]); showToast("බිල්පත හිස් කලා"); }} className="text-xs text-red-500 hover:underline font-bold">බිල හිස් කරන්න (Clear All)</button>
                   </div>
 
@@ -626,11 +551,11 @@ function App() {
                     ) : paymentMethod === "Cash" ? (
                       <div className="grid grid-cols-2 gap-3 bg-emerald-50/50 p-1 rounded-lg">
                         <div>
-                          <label className="text-[11px] font-bold text-emerald-800 block mb-1">💵 ලැබුණු මුදල (Cash):</label>
+                          <label className="text-[11px] font-bold text-emerald-800 block mb-1">💵 ලැබුණු Cash මුදල:</label>
                           <input type="number" placeholder="0.00" value={cashReceived} onChange={(e) => setCashReceived(e.target.value)} className="w-full p-2 border rounded text-sm font-black text-emerald-700 bg-white" />
                         </div>
                         <div>
-                          <label className="text-[11px] font-bold text-emerald-800 block mb-1">🔄 ඉතිරි මුදල (Balance):</label>
+                          <label className="text-[11px] font-bold text-emerald-800 block mb-1">🔄 ඉතිරි Balance මුදල:</label>
                           <div className="p-2 bg-white border border-emerald-300 rounded-lg font-black text-sm text-red-600 text-center">රු. {balanceAmount.toFixed(2)}</div>
                         </div>
                       </div>
@@ -811,7 +736,7 @@ function App() {
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-white text-center font-bold">
                     <div className="bg-emerald-600 p-4 rounded-xl shadow"><div>මුළු ආදායම</div><div className="text-2xl font-black mt-1">රු. {salesSummary.totalRevenue?.toFixed(2)}</div></div>
                     <div className="bg-teal-600 p-4 rounded-xl shadow"><div>ශුද්ධ ලාභය</div><div className="text-2xl font-black mt-1">රු. {salesSummary.totalProfit?.toFixed(2)}</div></div>
-                    <div className="bg-slate-800 p-4 rounded-xl shadow"><div>Total Invoices</div><div className="text-2xl font-black mt-1">{salesSummary.totalSalesCount}</div></div>
+                    <div className="bg-slate-800 p-4 rounded-xl shadow"><div>මුළු ඉන්වොයිසි</div><div className="text-2xl font-black mt-1">{salesSummary.totalSalesCount}</div></div>
                   </div>
                   <div className="bg-white p-4 rounded-xl border shadow-sm">
                     <table className="w-full text-left text-xs">
@@ -947,7 +872,7 @@ function App() {
                 </div>
                 {discPercent > 0 && (
                   <div className="text-[9px] text-red-600 font-bold italic pl-1">
-                    ↳ ({discPercent}% විශේෂ වට්ටම්)
+                    ↳ ({discPercent}% විශේෂ වට්ටම අඩු විය)
                   </div>
                 )}
               </div>
@@ -971,7 +896,7 @@ function App() {
           
           {paymentMethod === "Credit" && (
             <div className="flex justify-between text-red-600 font-bold border-t border-dashed pt-0.5">
-              <span>ගෙවීමට ඇති මුදල</span>
+              <span>ණය පොතට (Credit Due)</span>
               <span>රු. {(calculateTotal() - (amountPaid === "" ? 0 : parseFloat(amountPaid))).toFixed(2)}</span>
             </div>
           )}
@@ -993,7 +918,7 @@ function App() {
           return sum + (totalSavedPerItem * parseFloat(item.qty || 0));
         }, 0) > 0 && (
           <div className="mt-3 p-1.5 border border-black border-dashed text-center bg-slate-50">
-            <div className="font-bold text-[10px]">ඔබට ලැබුණු මුළු ලාභය</div>
+            <div className="font-bold text-[10px]">ඔබට ලැබුණු මුළු ලාභය (Total Savings)</div>
             <div className="font-black text-xs mt-0.5">
               Rs.{cart.reduce((sum, item) => {
                 const discP = parseFloat(item.discountPercent || item.discount) || 0;
