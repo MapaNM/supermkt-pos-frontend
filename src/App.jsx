@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
+import { db } from "./db";
 
 // 🛠️ HOSTING CONFIGURATION: Localhost සහ Render.com දෙකටම ගැලපෙන සේ පොදු URL එකක් සාදා ඇත
 // Render එකට දැමූ පසු "http://localhost:5008/api" වෙනුවට Render Live URL එක දමන්න
@@ -91,6 +92,43 @@ function App() {
     }
   }, [cashReceived, cart, amountPaid]);
 
+  useEffect(() => {
+    const handleOnline = async () => {
+      showToast("🔄 අන්තර්ජාලය නැවත ලැබුණි! දත්ත සමගාමී (Sync) කරයි...", "warning");
+      
+      // Pending බිල්පත් ලැයිස්තුව ලබා ගනී
+      const pendingSales = await db.offlineSales.where('status').equals('pending').toArray();
+      
+      if (pendingSales.length === 0) return;
+
+      for (const sale of pendingSales) {
+        try {
+          // එකින් එක සර්වර් එකට යවයි
+          await axios.post(`${API_BASE_URL}/products/checkout`, {
+            cartItems: sale.cartItems,
+            cashierName: sale.cashierName,
+            paymentMethod: sale.paymentMethod,
+            customerId: sale.customerId,
+            cashReceived: sale.cashReceived,
+            balanceAmount: sale.balanceAmount,
+            amountPaid: sale.amountPaid,
+            amountDue: sale.amountDue
+          });
+          
+          // සාර්ථක නම් Local DB එකෙන් මකා දමයි
+          await db.offlineSales.delete(sale.id);
+        } catch (err) {
+          console.error("ბიල Sync කිරීම අසාර්ථකයි:", err);
+        }
+      }
+      showToast("✅ සියලුම Offline බිල්පත් සාර්ථකව සර්වර් එකට යැවුවා! 🎉");
+      fetchProducts(); 
+    };
+
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [products]);
+
   // Barcode Scanner Logic
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -120,12 +158,27 @@ function App() {
   }, [products, cart, activeTab, user]);
 
   const fetchProducts = async () => {
-    try {
-      const response = await axios.get(`${API_BASE_URL}/products`);
-      setProducts(response.data);
-      setLoading(false);
-    } catch (error) { setLoading(false); }
-  };
+  try {
+    const response = await axios.get(`${API_BASE_URL}/products`);
+    setProducts(response.data);
+    setLoading(false);
+
+    // 🛠️ UPDATED: Online ආපු ගමන් බඩු ටික local DB එකටත් දානවා Offline පාවිච්චි කරන්න
+    await db.products.clear(); // පරණ දත්ත මකනවා
+    await db.products.bulkAdd(response.data); // අලුත් බඩු ටික දානවා
+    
+  } catch (error) {
+    console.log("Backend එකට සම්බන්ධ විය නොහැක. Offline දත්ත පරීක්ෂා කරයි... ⚠️");
+    
+    // 🛠️ UPDATED: සර්වර් Error නම් (Offline නම්) Local DB එකෙන් බඩු ටික ගන්නවා
+    const localProducts = await db.products.toArray();
+    if (localProducts.length > 0) {
+      setProducts(localProducts);
+      showToast("පද්ධතිය Offline ක්‍රියාත්මක වේ! 📴", "warning");
+    }
+    setLoading(false);
+  }
+};
 
   const fetchSalesSummary = async () => {
     try {
@@ -278,7 +331,7 @@ function App() {
       
     const receivedCash = parseFloat(cashReceived) || 0;
 
-    // Stock Validation (Skip temp unsaved items)
+    // Stock Validation
     for (const item of cart) {
       if (item.isTemporary) continue; 
       const dbProduct = products.find(p => p._id === item._id);
@@ -300,36 +353,69 @@ function App() {
       return showToast("හිඟ මුදලක් පවතී! කරුණාකර පාරිභෝගිකයෙකු සම්බන්ධ කරන්න. 👤", "warning");
     }
 
+    // Backend එකට සහ Offline DB එකට යැවීමට සකස් කරගත් Cart Object එක
+    const preparedCartItems = cart.map(item => {
+      const discP = parseFloat(item.discountPercent || item.discount) || 0;
+      return {
+        ...item,
+        _id: item.isTemporary ? null : item._id,
+        discount: (parseFloat(item.price) * discP) / 100 
+      };
+    });
+
+    const checkoutData = {
+      cartItems: preparedCartItems,
+      cashierName: user.username,
+      paymentMethod: paymentMethod,
+      customerId: selectedCustomer ? selectedCustomer._id : null,
+      cashReceived: paymentMethod === "Cash" ? receivedCash : 0,
+      balanceAmount: paymentMethod === "Cash" ? balanceAmount : 0,
+      amountPaid: paid, 
+      amountDue: total - paid 
+    };
+
     try {
-      await axios.post(`${API_BASE_URL}/products/checkout`, {
-        cartItems: cart.map(item => {
-          const discP = parseFloat(item.discountPercent || item.discount) || 0;
-          return {
-            ...item,
-            _id: item.isTemporary ? null : item._id, // Backend එකට null ලෙස යවයි
-            discount: (parseFloat(item.price) * discP) / 100 
-          };
-        }),
-        cashierName: user.username,
-        paymentMethod: paymentMethod,
-        customerId: selectedCustomer ? selectedCustomer._id : null,
-        cashReceived: paymentMethod === "Cash" ? receivedCash : 0,
-        balanceAmount: paymentMethod === "Cash" ? balanceAmount : 0,
-        amountPaid: paid, 
-        amountDue: total - paid 
-      });
+      // 🌐 ONLINE: සර්වර් එකට දත්ත යැවීමට උත්සාහ කරයි
+      await axios.post(`${API_BASE_URL}/products/checkout`, checkoutData);
+      
       window.print();
-      setCart([]);
-      setSelectedCustomer(null);
-      setSearchPhone("");
-      setCashReceived("");
-      setAmountPaid(""); 
-      setBalanceAmount(0);
-      setPaymentMethod("Cash");
+      resetBillingUI();
       showToast("ඉන්වොයිසිය සාර්ථකව මුද්‍රණය කලා! 🖨️✨");
       fetchProducts();
       fetchCustomers();
-    } catch (error) { showToast("Checkout අසාර්ථකයි!", "error"); }
+
+    } catch (error) {
+      // 📴 OFFLINE: ඉන්ටර්නෙට් නැතිනම් බිල බ්‍රවුසර් එකේ සේව් කරයි
+      if (!navigator.onLine || error.message === "Network Error") {
+        try {
+          await db.offlineSales.add({
+            ...checkoutData,
+            createdAt: new Date().toISOString(),
+            status: "pending"
+          });
+
+          window.print(); 
+          resetBillingUI();
+          showToast("⚠️ ඉන්ටර්නෙට් නොමැත! බිල ආරක්ෂිතව බ්‍රවුසර් එකේ සේව් කලා. 📴", "warning");
+          
+        } catch (dbError) {
+          showToast("Local Database එකට සේව් කිරීම අසාර්ථකයි!", "error");
+        }
+      } else {
+        showToast("Checkout අසාර්ථකයි!", "error");
+      }
+    }
+  };
+
+  // UI එක Reset කරන Helper Function එක (handleCheckoutAndPrint එකට යටින් දාන්න)
+  const resetBillingUI = () => {
+    setCart([]);
+    setSelectedCustomer(null);
+    setSearchPhone("");
+    setCashReceived("");
+    setAmountPaid(""); 
+    setBalanceAmount(0);
+    setPaymentMethod("Cash");
   };
 
   const handleVoidSale = async (saleId) => {
