@@ -546,7 +546,7 @@ function App() {
       <div className="print:hidden flex flex-col h-full">
         {/* Header */}
         <header className="bg-slate-900 text-white px-6 py-2.5 flex justify-between items-center shadow-md">
-          <h1 className="text-xl font-black tracking-wider flex items-center gap-2">GROCERY <span className="bg-blue-600 px-2 py-0.5 rounded text-xs font-bold">PRO-POS v2.0</span></h1>
+          <h1 className="text-xl font-black tracking-wider flex items-center gap-2">SmartStore <span className="bg-blue-600 px-2 py-0.5 rounded text-xs font-bold">PRO-POS v2.0</span></h1>
           <div className="flex space-x-3">
             <button onClick={() => setActiveTab("billing")} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${activeTab === "billing" ? "bg-blue-600 text-white shadow" : "text-gray-300 hover:bg-slate-800"}`}>Billing Window</button>
             {user.role === "admin" && <button onClick={() => setActiveTab("admin")} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${activeTab === "admin" ? "bg-blue-600 text-white shadow" : "text-gray-300 hover:bg-slate-800"}`}>Admin Dashboard</button>}
@@ -962,7 +962,7 @@ function App() {
 
       {/* 🖨️ INVOICE PRINT LAYOUT */}
       <div className="hidden print:block p-4 w-[80mm] text-black font-mono text-xs bg-white">
-        <div className="text-center font-bold text-sm">--- ABC GROCERY ---</div>
+        <div className="text-center font-bold text-sm">--- SmartStore ---</div>
         <div className="text-center text-[9px] text-gray-600">No. 123, Galle Road, Colombo</div>
         <hr className="border-dashed border-black my-1" />
         <div className="text-[10px] space-y-0.5">
