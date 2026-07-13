@@ -633,7 +633,20 @@ function App() {
                       <div>
                         <label className="text-[11px] font-bold text-red-700 block mb-1">💳 පාරිභෝගිකයා දැනට ගෙවන මුදල (Paid Amount):</label>
                         <input type="number" placeholder="ණය බිලෙන් අඩුවන මුදල (ගෙවන්නේ නැත්නම් හිස්ව තබන්න)" value={amountPaid} onChange={(e) => setAmountPaid(e.target.value)} className="w-full p-2 border rounded text-sm font-black text-slate-800 bg-red-50/30" />
-                        
+                        <div className="bg-slate-900 text-white p-3 mt-3 rounded-xl shadow">
+                  <h3 className="text-xs font-bold text-gray-400 mb-2">👤 CREDIT ACCOUNT LEDGER CONNECTOR</h3>
+                  <form onSubmit={handleSearchCustomer} className="flex space-x-2">
+                    {/* 🛠️ UPDATED: Placeholder එක නම හෝ දුරකථන අංකය ලෙස වෙනස් කර ඇත */}
+                    <input type="text" placeholder="නම හෝ දුරකථන අංකය ඇතුලත් කරන්න..." value={searchPhone} onChange={(e) => setSearchPhone(e.target.value)} className="p-2 border rounded-lg bg-slate-800 text-white flex-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                    <button type="submit" className="bg-blue-600 hover:bg-blue-700 text-white px-3 text-xs font-bold rounded-lg">Link</button>
+                  </form>
+                  {selectedCustomer && (
+                    <div className="mt-2 bg-blue-900/50 p-2 rounded border border-blue-700 flex justify-between items-center text-xs">
+                      <div>Account: <span className="font-bold text-yellow-400">{selectedCustomer.name}</span></div>
+                      <div className="text-red-400 font-bold">ණය: රු. {selectedCustomer.creditBalance}/=</div>
+                    </div>
+                  )}
+                </div>
                       </div>
                     ) : paymentMethod === "Cash" ? (
                       <div className="grid grid-cols-2 gap-3 bg-emerald-50/50 p-1 rounded-lg">
@@ -688,25 +701,12 @@ function App() {
                       <input type="text" placeholder="Barcode (Optional)" value={tempItemForm.barcode} onChange={(e) => setTempItemForm({ ...tempItemForm, barcode: e.target.value })} className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500" />
                     </div>
                     <button type="submit" className="w-full bg-amber-600 hover:bg-amber-700 text-white font-black py-2 rounded-lg text-xs transition-all shadow-sm">
-                      ➕ ඩේටාබේස් රහිතව බිලට පමණක් ඇතුලත් කරන්න
+                      ➕ Add to Bill (Without Database)
                     </button>
                   </form>
                 </div>
 
-                <div className="bg-slate-900 text-white p-3 rounded-xl shadow">
-                  <h3 className="text-xs font-bold text-gray-400 mb-2">👤 CREDIT ACCOUNT LEDGER CONNECTOR</h3>
-                  <form onSubmit={handleSearchCustomer} className="flex space-x-2">
-                    {/* 🛠️ UPDATED: Placeholder එක නම හෝ දුරකථන අංකය ලෙස වෙනස් කර ඇත */}
-                    <input type="text" placeholder="නම හෝ දුරකථන අංකය ඇතුලත් කරන්න..." value={searchPhone} onChange={(e) => setSearchPhone(e.target.value)} className="p-2 border rounded-lg bg-slate-800 text-white flex-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                    <button type="submit" className="bg-blue-600 hover:bg-blue-700 text-white px-3 text-xs font-bold rounded-lg">Link</button>
-                  </form>
-                  {selectedCustomer && (
-                    <div className="mt-2 bg-blue-900/50 p-2 rounded border border-blue-700 flex justify-between items-center text-xs">
-                      <div>Account: <span className="font-bold text-yellow-400">{selectedCustomer.name}</span></div>
-                      <div className="text-red-400 font-bold">ණය: රු. {selectedCustomer.creditBalance}/=</div>
-                    </div>
-                  )}
-                </div>
+                
 
                 <div className="relative">
                   <input type="text" placeholder="🔍  භාණ්ඩයේ නම හෝ බාර්කෝඩ් ගසන්න..." value={billingSearch} onChange={(e) => setBillingSearch(e.target.value)} className="w-full p-2.5 pl-9 border rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-medium text-sm" />
@@ -1001,7 +1001,7 @@ function App() {
                 </div>
                 {discPercent > 0 && (
                   <div className="text-[9px] text-red-600 font-bold italic pl-1">
-                    ↳ ({discPercent}% විශේෂ වට්ටම අඩු විය)
+                    ↳ ({discPercent}% Discount)
                   </div>
                 )}
               </div>
