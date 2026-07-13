@@ -54,7 +54,9 @@ function App() {
   const [productForm, setProductForm] = useState({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg" });
 
   // Emergency Temp Item Form State (For Any Role)
-  const [tempItemForm, setTempItemForm] = useState({ name: "", price: "", qty: "1", unit: "Pcs", barcode: "" });
+  const [tempItemForm, setTempItemForm] = useState({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
+
+  const [showTempItemModal, setShowTempItemModal] = useState(false);
 
   // Custom Toast State
   const [toasts, setToasts] = useState([]);
@@ -80,6 +82,25 @@ function App() {
       }
     }
   }, [user]);
+
+  // Escape key + background scroll lock
+useEffect(() => {
+  if (!showTempItemModal) return;
+
+  const handleEsc = (e) => {
+    if (e.key === "Escape") {
+      setShowTempItemModal(false);
+    }
+  };
+
+  document.body.style.overflow = "hidden";
+  window.addEventListener("keydown", handleEsc);
+
+  return () => {
+    document.body.style.overflow = "unset";
+    window.removeEventListener("keydown", handleEsc);
+  };
+}, [showTempItemModal]);
 
   // Live Balance Calculation
   useEffect(() => {
@@ -118,10 +139,10 @@ function App() {
           // සාර්ථක නම් Local DB එකෙන් මකා දමයි
           await db.offlineSales.delete(sale.id);
         } catch (err) {
-          console.error("ბიල Sync කිරීම අසාර්ථකයි:", err);
+          console.error("​බිල Sync කිරීම අසාර්ථකයි:", err);
         }
       }
-      showToast("✅ සියලුම Offline බිල්පත් සාර්ථකව සර්වර් එකට යැවුවා! 🎉");
+      showToast("✅ සියලුම Offline බිල්පත් සාර්ථකව server එකට යැවුවා! 🎉");
       fetchProducts(); 
     };
 
@@ -276,7 +297,7 @@ function App() {
     const tempProduct = {
       // 🛠️ Unsaved අලුත් අයිටම් එකට Front-end එකෙන් හදන Dynamic ID එකක් ලබාදෙයි
       _id: `temp_${Date.now()}`, 
-      name: `⚠️ ${tempItemForm.name} (Unsaved)`,
+      name: `${tempItemForm.name}`,
       price: parseFloat(tempItemForm.price),
       marketPrice: parseFloat(tempItemForm.price),
       costPrice: parseFloat(tempItemForm.price) * 0.85, 
@@ -291,7 +312,7 @@ function App() {
 
     setCart([...cart, tempProduct]);
     showToast(`"${tempProduct.name}" තාවකාලිකව බිලට එකතු කලා! 📥`, "warning");
-    setTempItemForm({ name: "", price: "", qty: "1", unit: "Pcs", barcode: "" });
+    setTempItemForm({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
   };
 
   const updateCartQtyDirectly = (id, value) => {
@@ -680,36 +701,110 @@ function App() {
               <div className="w-full lg:w-2/5 p-4 overflow-y-auto flex flex-col space-y-4">
                 
                 {/* Emergency Unsaved Item Adding Widget */}
-                <div className="bg-linear-to-br from-amber-50 to-orange-100/60 p-4 rounded-xl border border-amber-300 shadow-sm">
-                  <div className="flex items-center gap-2 mb-2">
+                {/* 🔘 Trigger Button - ඔයාට ඕන තැනකට JSX return එකේ දාන්න */}
+                  <button
+                    onClick={() => setShowTempItemModal(true)}
+                    className="flex justify-center items-center  gap-2 bg-amber-100 hover:bg-amber-200 border border-amber-300 text-amber-900 font-black px-3 py-2 rounded-lg text-xs transition-all"
+                  >
                     <span className="text-base">🚨</span>
-                    <h3 className="text-xs font-black text-amber-900 tracking-wider uppercase">හදිසි අවස්ථා - තාවකාලික භාණ්ඩ ඇතුලත් කිරීම</h3>
-                  </div>
-                  <p className="text-[10px] text-amber-800 font-semibold mb-3">Database එකේ නැති අලුත් බඩු, DB එකට සේව් නොකර කෙලින්ම මෙම බිලට පමණක් එකතු කිරීමට පහත විස්තර පුරවන්න.</p>
-                  
-                  <form onSubmit={handleAddTempItemToCart} className="space-y-2">
-                    <div className="grid grid-cols-2 gap-2">
-                      <input type="text" placeholder="භාණ්ඩයේ නම" value={tempItemForm.name} onChange={(e) => setTempItemForm({ ...tempItemForm, name: e.target.value })} className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold" />
-                      <input type="number" placeholder="විකුණුම් මිල (රු.)" value={tempItemForm.price} onChange={(e) => setTempItemForm({ ...tempItemForm, price: e.target.value })} className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold" />
+                    හදිසි අවස්ථා - තාවකාලික භාණ්ඩ ඇතුලත් කිරීම
+                    <span className="text-base">➕</span>
+
+                  </button>
+
+                  {/* 🪟 Modal Popup */}
+                  {showTempItemModal && (
+                    <div
+                      className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+                      onClick={() => setShowTempItemModal(false)}
+                    >
+                      <div
+                        className="bg-linear-to-br from-amber-50 to-orange-100/60 p-4 rounded-xl border border-amber-300 shadow-xl w-full max-w-md relative"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          onClick={() => setShowTempItemModal(false)}
+                          className="absolute top-3 right-3 text-amber-800 hover:text-amber-950 font-black text-lg leading-none"
+                        >
+                          ✕
+                        </button>
+
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-base">🚨</span>
+                          <h3 className="text-xs font-black text-amber-900 tracking-wider uppercase pr-4">
+                            හදිසි අවස්ථා - තාවකාලික භාණ්ඩ ඇතුලත් කිරීම
+                          </h3>
+                        </div>
+                        <p className="text-[10px] text-amber-800 font-semibold mb-3">
+                          Database එකේ නැති අලුත් බඩු, DB එකට සේව් නොකර කෙලින්ම මෙම බිලට පමණක් එකතු කිරීමට පහත විස්තර පුරවන්න.
+                        </p>
+
+                        <form
+                          onSubmit={(e) => {
+                            handleAddTempItemToCart(e);
+                            setShowTempItemModal(false);
+                          }}
+                          className="space-y-2"
+                        >
+                          <div className="grid grid-cols-2 gap-2">
+                            <input
+                              type="text"
+                              placeholder="භාණ්ඩයේ නම"
+                              value={tempItemForm.name}
+                              onChange={(e) => setTempItemForm({ ...tempItemForm, name: e.target.value })}
+                              className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
+                            />
+                            <input
+                              type="number"
+                              placeholder="විකුණුම් මිල (රු.)"
+                              value={tempItemForm.price}
+                              onChange={(e) => setTempItemForm({ ...tempItemForm, price: e.target.value })}
+                              className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
+                            />
+                          </div>
+                          <div className="grid grid-cols-3 gap-2">
+                            <input
+                              type="number"
+                              step="0.001"
+                              placeholder="ප්‍රමාණය"
+                              value={tempItemForm.qty}
+                              onChange={(e) => setTempItemForm({ ...tempItemForm, qty: e.target.value })}
+                              className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
+                            />
+                            <select
+                              value={tempItemForm.unit}
+                              onChange={(e) => setTempItemForm({ ...tempItemForm, unit: e.target.value })}
+                              className="p-2 text-xs bg-white border border-amber-300 rounded-lg font-bold"
+                            >
+                              <option value="Kg">Kilogram (Kg)</option>
+                              <option value="G">Gram (G)</option>
+                              <option value="Pcs">Pieces (Pcs)</option>
+                              <option value="Packet">Packet</option>
+                              <option value="Bottle">Bottle</option>
+                            </select>
+                            <input
+                              type="text"
+                              placeholder="Barcode (Optional)"
+                              value={tempItemForm.barcode}
+                              onChange={(e) => setTempItemForm({ ...tempItemForm, barcode: e.target.value })}
+                              className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500"
+                            />
+                          </div>
+                          <button
+                            type="submit"
+                            className="w-full bg-amber-600 hover:bg-amber-700 text-white font-black py-2 rounded-lg text-xs transition-all shadow-sm"
+                          >
+                            ➕ Add to Bill (Without Database)
+                          </button>
+                        </form>
+                      </div>
                     </div>
-                    <div className="grid grid-cols-3 gap-2">
-                      <input type="number" step="0.001" placeholder="ප්‍රමාණය" value={tempItemForm.qty} onChange={(e) => setTempItemForm({ ...tempItemForm, qty: e.target.value })} className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold" />
-                      <select value={tempItemForm.unit} onChange={(e) => setTempItemForm({ ...tempItemForm, unit: e.target.value })} className="p-2 text-xs bg-white border border-amber-300 rounded-lg font-bold">
-                        <option value="Pcs">Pcs</option>
-                        <option value="Kg">Kg</option>
-                      </select>
-                      <input type="text" placeholder="Barcode (Optional)" value={tempItemForm.barcode} onChange={(e) => setTempItemForm({ ...tempItemForm, barcode: e.target.value })} className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500" />
-                    </div>
-                    <button type="submit" className="w-full bg-amber-600 hover:bg-amber-700 text-white font-black py-2 rounded-lg text-xs transition-all shadow-sm">
-                      ➕ Add to Bill (Without Database)
-                    </button>
-                  </form>
-                </div>
+                  )}
 
                 
 
                 <div className="relative">
-                  <input type="text" placeholder="🔍  භාණ්ඩයේ නම හෝ බාර්කෝඩ් ගසන්න..." value={billingSearch} onChange={(e) => setBillingSearch(e.target.value)} className="w-full p-2.5 pl-9 border rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-medium text-sm" />
+                  <input type="text" placeholder="🔍  භාණ්ඩයේ නම හෝ බාර්කෝඩ් එක ඇතුලත් කරන්න..." value={billingSearch} onChange={(e) => setBillingSearch(e.target.value)} className="w-full p-2.5 pl-9 border rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-medium text-sm" />
                   <span className="absolute left-3 top-3 text-gray-400 text-sm">🔍</span>
                 </div>
 
@@ -963,7 +1058,7 @@ function App() {
       {/* 🖨️ INVOICE PRINT LAYOUT */}
       <div className="hidden print:block p-4 w-[80mm] text-black font-mono text-xs bg-white">
         <div className="text-center font-bold text-sm">--- SmartStore ---</div>
-        <div className="text-center text-[9px] text-gray-600">No. 123, Galle Road, Colombo</div>
+        <div className="text-center text-[9px] text-gray-600">No. 123/A, Kandy Road, Kadawatha</div>
         <hr className="border-dashed border-black my-1" />
         <div className="text-[10px] space-y-0.5">
           <div><b>බිල් අංකය:</b> IN-{Math.floor(1000 + Math.random() * 9000)}</div>
@@ -1047,7 +1142,7 @@ function App() {
           return sum + (totalSavedPerItem * parseFloat(item.qty || 0));
         }, 0) > 0 && (
           <div className="mt-3 p-1.5 border border-black border-dashed text-center bg-slate-50">
-            <div className="font-bold text-[10px]">ඔබට ලැබුණු මුළු ලාභය (Total Savings)</div>
+            <div className="font-bold text-[10px]">ඔබට ලැබුණු මුළු ලාභය</div>
             <div className="font-black text-xs mt-0.5">
               Rs.{cart.reduce((sum, item) => {
                 const discP = parseFloat(item.discountPercent || item.discount) || 0;
