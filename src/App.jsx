@@ -31,6 +31,12 @@ function App() {
   const [editCustomerId, setEditCustomerId] = useState(null);
   const [creditPayment, setCreditPayment] = useState({ customerId: "", amount: "" });
 
+  // 🛠️ NEW: Live Customer Search (Suggestions Dropdown) States
+  const [customerSuggestions, setCustomerSuggestions] = useState([]);
+  const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
+  const [customerSearchLoading, setCustomerSearchLoading] = useState(false);
+  const [highlightedCustomerIndex, setHighlightedCustomerIndex] = useState(-1);
+
   // Payment Method State
   const [paymentMethod, setPaymentMethod] = useState("Cash");
 
@@ -112,6 +118,34 @@ useEffect(() => {
       setBalanceAmount(0);
     }
   }, [cashReceived, cart, amountPaid]);
+
+  // 🛠️ NEW: Live Customer Search (Debounce Logic)
+  useEffect(() => {
+    if (searchPhone.trim().length === 0) {
+      setCustomerSuggestions([]);
+      setShowCustomerDropdown(false);
+      setHighlightedCustomerIndex(-1);
+      return;
+    }
+
+    setCustomerSearchLoading(true);
+
+    const debounceTimer = setTimeout(async () => {
+      try {
+        const response = await axios.get(`${API_BASE_URL}/customers/search/${searchPhone}`);
+        setCustomerSuggestions(response.data);
+        setShowCustomerDropdown(true);
+        setHighlightedCustomerIndex(-1);
+      } catch (error) {
+        setCustomerSuggestions([]);
+        setShowCustomerDropdown(false);
+      } finally {
+        setCustomerSearchLoading(false);
+      }
+    }, 300);
+
+    return () => clearTimeout(debounceTimer);
+  }, [searchPhone]);
 
   useEffect(() => {
     const handleOnline = async () => {
@@ -252,14 +286,38 @@ useEffect(() => {
     }
   };
 
-  const handleSearchCustomer = async (e) => {
-    e.preventDefault();
-    try {
-      // 🛠️ UPDATED: දැන් නම හෝ දුරකථන අංකය යන දෙකෙන්ම සෙවිය හැක
-      const response = await axios.get(`${API_BASE_URL}/customers/search/${searchPhone}`);
-      setSelectedCustomer(response.data);
-      showToast("පාරිභෝගික ගිණුම සාර්ථකව සම්බන්ධ කලා! 👤");
-    } catch (error) { showToast("මෙම නමින් හෝ අංකයෙන් පාරිභෝගිකයෙකු සොයාගත නොහැක!", "warning"); }
+  // 🛠️ UPDATED: Dropdown එකෙන් හෝ Enter key එකෙන් පාරිභෝගිකයෙක් තෝරාගැනීම
+  const handleSelectCustomer = (customer) => {
+    setSelectedCustomer(customer);
+    setSearchPhone(customer.name);
+    setShowCustomerDropdown(false);
+    setCustomerSuggestions([]);
+    setHighlightedCustomerIndex(-1);
+    showToast("පාරිභෝගික ගිණුම සාර්ථකව සම්බන්ධ කලා! 👤");
+  };
+
+  // 🛠️ UPDATED: Keyboard එකෙන් suggestions dropdown එක navigate කිරීම (ArrowUp/Down + Enter + Escape)
+  const handleCustomerSearchKeyDown = (e) => {
+    if (!showCustomerDropdown || customerSuggestions.length === 0) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlightedCustomerIndex((prev) => (prev < customerSuggestions.length - 1 ? prev + 1 : prev));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlightedCustomerIndex((prev) => (prev > 0 ? prev - 1 : 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const indexToSelect = highlightedCustomerIndex >= 0 ? highlightedCustomerIndex : 0;
+      if (customerSuggestions[indexToSelect]) {
+        handleSelectCustomer(customerSuggestions[indexToSelect]);
+      } else {
+        showToast("මෙම නමින් හෝ අංකයෙන් පාරිභෝගිකයෙකු සොයාගත නොහැක!", "warning");
+      }
+    } else if (e.key === "Escape") {
+      setShowCustomerDropdown(false);
+      setHighlightedCustomerIndex(-1);
+    }
   };
 
   const handleSettleCredit = async (e) => {
@@ -433,6 +491,9 @@ useEffect(() => {
     setCart([]);
     setSelectedCustomer(null);
     setSearchPhone("");
+    setCustomerSuggestions([]);
+    setShowCustomerDropdown(false);
+    setHighlightedCustomerIndex(-1);
     setCashReceived("");
     setAmountPaid(""); 
     setBalanceAmount(0);
@@ -654,13 +715,52 @@ useEffect(() => {
                       <div>
                         <label className="text-[11px] font-bold text-red-700 block mb-1">💳 පාරිභෝගිකයා දැනට ගෙවන මුදල (Paid Amount):</label>
                         <input type="number" placeholder="ණය බිලෙන් අඩුවන මුදල (ගෙවන්නේ නැත්නම් හිස්ව තබන්න)" value={amountPaid} onChange={(e) => setAmountPaid(e.target.value)} className="w-full p-2 border rounded text-sm font-black text-slate-800 bg-red-50/30" />
-                        <div className="bg-slate-900 text-white p-3 mt-3 rounded-xl shadow">
+                        <div className="bg-slate-900 text-white p-3 mt-3 rounded-xl shadow relative">
                   <h3 className="text-xs font-bold text-gray-400 mb-2">👤 CREDIT ACCOUNT LEDGER CONNECTOR</h3>
-                  <form onSubmit={handleSearchCustomer} className="flex space-x-2">
-                    {/* 🛠️ UPDATED: Placeholder එක නම හෝ දුරකථන අංකය ලෙස වෙනස් කර ඇත */}
-                    <input type="text" placeholder="නම හෝ දුරකථන අංකය ඇතුලත් කරන්න..." value={searchPhone} onChange={(e) => setSearchPhone(e.target.value)} className="p-2 border rounded-lg bg-slate-800 text-white flex-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                    <button type="submit" className="bg-blue-600 hover:bg-blue-700 text-white px-3 text-xs font-bold rounded-lg">Link</button>
-                  </form>
+
+                  <div className="relative">
+                    <div className="flex items-center space-x-2">
+                      {/* 🛠️ UPDATED: දැන් type කරන කොටම (Live) suggestions පෙන්වයි, Enter → තෝරාගැනීම */}
+                      <input
+                        type="text"
+                        placeholder="නම හෝ දුරකථන අංකය type කරන්න... (Enter → තෝරන්න)"
+                        value={searchPhone}
+                        onChange={(e) => setSearchPhone(e.target.value)}
+                        onKeyDown={handleCustomerSearchKeyDown}
+                        autoComplete="off"
+                        className="p-2 border rounded-lg bg-slate-800 text-white flex-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                      {customerSearchLoading && (
+                        <span className="text-[10px] text-amber-400 whitespace-nowrap">සොයමින්...</span>
+                      )}
+                    </div>
+
+                    {/* 🛠️ NEW: Live Search Suggestions Dropdown */}
+                    {showCustomerDropdown && customerSuggestions.length > 0 && (
+                      <ul className="absolute z-20 w-full mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                        {customerSuggestions.map((customer, index) => (
+                          <li
+                            key={customer._id}
+                            onClick={() => handleSelectCustomer(customer)}
+                            onMouseEnter={() => setHighlightedCustomerIndex(index)}
+                            className={`px-3 py-2 cursor-pointer border-b border-slate-700 last:border-b-0 text-xs transition-colors ${
+                              index === highlightedCustomerIndex ? "bg-blue-700/60" : "hover:bg-slate-700"
+                            }`}
+                          >
+                            <p className="font-bold text-white">{customer.name}</p>
+                            <p className="text-[10px] text-gray-400">{customer.phone}</p>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {showCustomerDropdown && customerSuggestions.length === 0 && !customerSearchLoading && (
+                      <div className="absolute z-20 w-full mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-lg px-3 py-2 text-[11px] text-gray-400">
+                        පාරිභෝගිකයෙකු සොයාගත නොහැක!
+                      </div>
+                    )}
+                  </div>
+
                   {selectedCustomer && (
                     <div className="mt-2 bg-blue-900/50 p-2 rounded border border-blue-700 flex justify-between items-center text-xs">
                       <div>Account: <span className="font-bold text-yellow-400">{selectedCustomer.name}</span></div>
