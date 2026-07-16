@@ -57,7 +57,7 @@ function App() {
   // Product CRUD States
   const [isEditing, setIsEditing] = useState(false);
   const [editId, setEditId] = useState(null);
-  const [productForm, setProductForm] = useState({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg" });
+  const [productForm, setProductForm] = useState({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery" });
 
   // Emergency Temp Item Form State (For Any Role)
   const [tempItemForm, setTempItemForm] = useState({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
@@ -540,7 +540,8 @@ useEffect(() => {
       stock: parseFloat(productForm.stock) || 0,
       barcode: productForm.barcode,
       discount: parseFloat(productForm.discountPercent) || 0,
-      unit: productForm.unit
+      unit: productForm.unit,
+      category: productForm.category
     };
     try {
       if (isEditing) {
@@ -552,7 +553,7 @@ useEffect(() => {
         await axios.post(`${API_BASE_URL}/products/add`, submissionData);
         showToast("අලුත් භාණ්ඩය සාර්ථකව ඩේටාබේස් එකට එකතු කලා! ✅");
       }
-      setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg" });
+      setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery" });
       fetchProducts();
     } catch (error) { showToast("ක්‍රියාවලිය අසාර්ථකයි!", "error"); }
   };
@@ -568,7 +569,8 @@ useEffect(() => {
       stock: product.stock,
       barcode: product.barcode || "",
       discountPercent: product.discount || "", 
-      unit: product.unit || "Kg"
+      unit: product.unit || "Kg",
+      category: product.category || "Grocery"
     });
   };
 
@@ -991,11 +993,25 @@ useEffect(() => {
                           </select>
                         </div>
                         <div>
+                          <label className="text-[11px] font-bold text-gray-600 block mb-1">භාණ්ඩයේ වර්ගය (Category):</label>
+                          <select value={productForm.category} onChange={(e) => setProductForm({ ...productForm, category: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 text-gray-700 font-bold">
+                            <option value="Grocery">Grocery (සිල්ල​ර බඩු)</option>
+                            <option value="Vegetables">Vegetables (එළවළු)</option>
+                            <option value="Fruits">Fruits (පළතුරු)</option>
+                            <option value="Beverages">Beverages (බීම වර්ග)</option>
+                            <option value="Dairy">Dairy (කිරි නිෂ්පාදන)</option>
+                            <option value="Bakery">Bakery (පාන්/කේක්)</option>
+                            <option value="Cosmetics">Cosmetics (රූපලාවන්‍ය ද්‍ර​ව්‍ය)</option>
+                            <option value="Household">Household (ගෘහ උපකරණ)</option>
+                            <option value="Other">Other (වෙනත්)</option>
+                          </select>
+                        </div>
+                        <div>
                           <label className="text-[11px] font-bold text-gray-600 block mb-1">විශේෂ වට්ටම් ප්‍රතිශතය (%):</label>
                           <input type="number" placeholder="0" value={productForm.discountPercent} onChange={(e) => setProductForm({ ...productForm, discountPercent: e.target.value })} className="w-full p-2 border rounded text-xs bg-red-50/50" />
                         </div>
                         <div className="col-span-2 md:col-span-4 flex justify-end gap-2 pt-2">
-                          {isEditing && <button type="button" onClick={() => { setIsEditing(false); setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg" }); }} className="bg-gray-500 text-white px-4 py-2 rounded text-xs font-bold">Cancel</button>}
+                          {isEditing && <button type="button" onClick={() => { setIsEditing(false); setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery" }); }} className="bg-gray-500 text-white px-4 py-2 rounded text-xs font-bold">Cancel</button>}
                           <button type="submit" className="bg-blue-600 text-white px-6 py-2 rounded text-xs font-bold shadow-md">{isEditing ? "යාවත්කාලීන කරන්න" : "ඩේටාබේස් එකට එකතු කරන්න"}</button>
                         </div>
                       </form>
@@ -1011,6 +1027,7 @@ useEffect(() => {
                         <thead>
                           <tr className="bg-slate-100 text-slate-700 font-bold border-b border-gray-200">
                             <th className="p-3">භාණ්ඩයේ නම</th>
+                            <th className="p-3">වර්ගය</th>
                             <th className="p-3">බාර්කෝඩ්</th>
                             <th className="p-3 text-right">වෙළඳපල මිල</th>
                             <th className="p-3 text-right">අපේ මිල</th>
@@ -1024,6 +1041,7 @@ useEffect(() => {
                           {filteredAdminProducts.map((p) => (
                             <tr key={p._id} className="hover:bg-slate-50/80">
                               <td className="p-3 font-bold text-slate-900">{p.name}</td>
+                              <td className="p-3 font-bold text-emerald-700">{p.category}</td>
                               <td className="p-3 text-gray-500">{p.barcode || "N/A"}</td>
                               <td className="p-3 text-right text-gray-500">රු. {p.marketPrice?.toFixed(2) || p.price?.toFixed(2)}</td>
                               <td className="p-3 text-right font-black text-blue-600">රු. {p.price.toFixed(2)}</td>
@@ -1220,7 +1238,7 @@ useEffect(() => {
           
           {paymentMethod === "Credit" && (
             <div className="flex justify-between text-red-600 font-bold border-t border-dashed pt-0.5">
-              <span>ණය පොතට (Credit Due)</span>
+              <span>ගෙවීමට ඇති මුදල(Credit Due)</span>
               <span>රු. {(calculateTotal() - (amountPaid === "" ? 0 : parseFloat(amountPaid))).toFixed(2)}</span>
             </div>
           )}
