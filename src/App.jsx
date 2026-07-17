@@ -3,8 +3,24 @@ import axios from "axios";
 import { db } from "./db";
 
 // 🛠️ HOSTING CONFIGURATION: Localhost සහ Render.com දෙකටම ගැලපෙන සේ පොදු URL එකක් සාදා ඇත
-// Render එකට දැමූ පසු "http://localhost:5008/api" වෙනුවට Render Live URL එක දමන්න
+// Render එකට දැමූ පසු "http://localhost:5008/api", "https://supermkt-pos-backend.onrender.com/api" වෙනුවට Render Live URL එක දමන්න
 const API_BASE_URL = "https://supermkt-pos-backend.onrender.com/api"; 
+
+// 🛠️ NEW: සියලුම Product Categories එකම තැනකින් manage කිරීමට (Admin dropdown + Billing sidebar දෙකටම use වේ)
+const PRODUCT_CATEGORIES = [
+  { value: "Grocery", label: "Grocery (සිල්ලර බඩු)", icon: "👜" },
+  { value: "Vegetables", label: "Vegetables (එළවළු)", icon: "🥦" },
+  { value: "Fruits", label: "Fruits (පළතුරු)", icon: "🍎" },
+  { value: "Beverages", label: "Beverages (බීම වර්ග)", icon: "🥤" },
+  { value: "Snacks", label: "Snacks (කෑම/නැවුම්)", icon: "🍟" },
+  { value: "Sweets", label: "Sweets (රසකැවිලි)", icon: "🍬" },
+  { value: "Biscuits", label: "Biscuits (බිස්කට්)", icon: "🍪" },
+  { value: "Dairy", label: "Dairy (කිරි නිෂ්පාදන)", icon: "🥛" },
+  { value: "Bakery", label: "Bakery (පාන්/කේක්)", icon: "🍞" },
+  { value: "Cosmetics", label: "Cosmetics (රූපලාවන්‍ය ද්‍රව්‍ය)", icon: "💄" },
+  { value: "Household", label: "Household (ගෘහ උපකරණ)", icon: "🧴" },
+  { value: "Other", label: "Other (වෙනත්)", icon: "📦" },
+];
 
 function App() {
   const [activeTab, setActiveTab] = useState("billing");
@@ -16,6 +32,7 @@ function App() {
   // Search States
   const [billingSearch, setBillingSearch] = useState("");
   const [adminProductSearch, setAdminProductSearch] = useState("");
+  const [billingCategoryFilter, setBillingCategoryFilter] = useState("All"); // 🛠️ NEW: Billing screen category filter
 
   // Cash & Payment States
   const [cashReceived, setCashReceived] = useState("");
@@ -584,10 +601,19 @@ useEffect(() => {
     }
   };
 
-  const filteredBillingProducts = products.filter(p => 
-    p.name.toLowerCase().includes(billingSearch.toLowerCase()) || 
-    (p.barcode && p.barcode.includes(billingSearch))
-  );
+  const filteredBillingProducts = products.filter(p => {
+    const matchesSearch = p.name.toLowerCase().includes(billingSearch.toLowerCase()) || 
+      (p.barcode && p.barcode.includes(billingSearch));
+    const matchesCategory = billingCategoryFilter === "All" || (p.category || "Grocery") === billingCategoryFilter;
+    return matchesSearch && matchesCategory;
+  });
+
+  // 🛠️ NEW: Category tab එක් එකකට කීයක් products තියෙනවද කියලා ගණන් කිරීම (badge count සඳහා)
+  const billingCategoryCounts = products.reduce((counts, p) => {
+    const cat = p.category || "Grocery";
+    counts[cat] = (counts[cat] || 0) + 1;
+    return counts;
+  }, {});
 
   const filteredAdminProducts = products.filter(p => 
     p.name.toLowerCase().includes(adminProductSearch.toLowerCase()) || 
@@ -800,7 +826,7 @@ useEffect(() => {
               </div>
 
               {/* RIGHT SIDE: PRODUCTS PANEL & EMERGENCY QUICK ADD */}
-              <div className="w-full lg:w-2/5 p-4 overflow-y-auto flex flex-col space-y-4">
+              <div className="w-full lg:w-2/5 p-4 flex flex-col space-y-4 overflow-hidden">
                 
                 {/* Emergency Unsaved Item Adding Widget */}
                 {/* 🔘 Trigger Button - ඔයාට ඕන තැනකට JSX return එකේ දාන්න */}
@@ -905,36 +931,81 @@ useEffect(() => {
 
                 
 
-                <div className="relative">
-                  <input type="text" placeholder="🔍  භාණ්ඩයේ නම හෝ බාර්කෝඩ් එක ඇතුලත් කරන්න..." value={billingSearch} onChange={(e) => setBillingSearch(e.target.value)} className="w-full p-2.5 pl-9 border rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-medium text-sm" />
-                  <span className="absolute left-3 top-3 text-gray-400 text-sm">🔍</span>
-                </div>
+                {/* 🛠️ UPDATED: Category Sidebar (vertical, scrollable) + Search/Grid column - Real POS layout */}
+                <div className="flex-1 flex gap-3 min-h-0">
 
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {filteredBillingProducts.map((product) => {
-                    const discP = parseFloat(product.discount) || 0; 
-                    const finalPrice = product.price - (product.price * discP) / 100;
-                    const isLowStock = product.stock <= 5;
-                    
-                    return (
-                      <button 
-                        key={product._id} 
-                        onClick={() => addToCart(product)} 
-                        className={`p-3 rounded-xl shadow-sm text-left border relative transition-all active:scale-95 ${
-                          isLowStock 
-                            ? 'border-red-500 bg-red-100 text-red-900 animate-pulse ring-2 ring-red-400 shadow-md shadow-red-200' 
-                            : 'bg-white hover:border-blue-400'
+                  {/* Category Sidebar */}
+                  <div className="w-16 sm:w-20 shrink-0 flex flex-col gap-1.5 overflow-y-auto pr-1">
+                    <button
+                      onClick={() => setBillingCategoryFilter("All")}
+                      className={`flex flex-col items-center justify-center gap-0.5 py-2 px-1 rounded-xl border text-center transition-all ${
+                        billingCategoryFilter === "All"
+                          ? "bg-blue-600 text-white border-blue-600 shadow-md"
+                          : "bg-white text-gray-600 border-gray-200 hover:border-blue-400 hover:text-blue-600"
+                      }`}
+                    >
+                      <span className="text-base leading-none">🗂️</span>
+                      <span className="text-[9px] font-bold leading-tight truncate w-full">සියල්ල</span>
+                      <span className={`text-[9px] px-1 rounded-full ${billingCategoryFilter === "All" ? "bg-white/20" : "bg-gray-100"}`}>{products.length}</span>
+                    </button>
+
+                    {PRODUCT_CATEGORIES.map((cat) => (
+                      <button
+                        key={cat.value}
+                        onClick={() => setBillingCategoryFilter(cat.value)}
+                        className={`flex flex-col items-center justify-center gap-0.5 py-2 px-1 rounded-xl border text-center transition-all ${
+                          billingCategoryFilter === cat.value
+                            ? "bg-blue-600 text-white border-blue-600 shadow-md"
+                            : "bg-white text-gray-600 border-gray-200 hover:border-blue-400 hover:text-blue-600"
                         }`}
                       >
-                        {discP > 0 && <span className="absolute top-1 right-1 bg-red-500 text-white text-[9px] px-1.5 rounded-full font-bold">{discP}% OFF</span>}
-                        <div className="font-bold text-slate-800 text-xs truncate">{product.name}</div>
-                        <div className="text-blue-600 font-black text-sm mt-1">රු. {finalPrice.toFixed(2)}</div>
-                        <div className={`text-[10px] font-bold mt-1 ${isLowStock ? 'text-red-700 bg-red-200 px-1 py-0.5 rounded w-fit' : 'text-gray-400'}`}>
-                          {isLowStock ? `⚠️ අඩු තොග (Low): ${product.stock}` : `තොග: ${product.stock}`} {product.unit || "Kg"}
-                        </div>
+                        <span className="text-base leading-none">{cat.icon}</span>
+                        <span className="text-[9px] font-bold leading-tight truncate w-full">{cat.value}</span>
+                        <span className={`text-[9px] px-1 rounded-full ${billingCategoryFilter === cat.value ? "bg-white/20" : "bg-gray-100"}`}>{billingCategoryCounts[cat.value] || 0}</span>
                       </button>
-                    );
-                  })}
+                    ))}
+                  </div>
+
+                  {/* Search + Product Grid (scrolls independently from the sidebar) */}
+                  <div className="flex-1 flex flex-col gap-3 min-w-0 overflow-y-1 pr-1">
+                    <div className="relative top-0.5 z-10 bg-gray-100/95 backdrop-blur-sm pb-1 -mt-0.5">
+                      <input type="text" placeholder="🔍  භාණ්ඩයේ නම හෝ බාර්කෝඩ් එක ඇතුලත් කරන්න..." value={billingSearch} onChange={(e) => setBillingSearch(e.target.value)} className="w-full p-2.5 pl-9 border rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-medium text-sm" />
+                      <span className="absolute left-3 top-3 text-gray-400 text-sm">🔍</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {filteredBillingProducts.length === 0 && (
+                        <div className="col-span-2 sm:col-span-3 flex flex-col items-center justify-center text-gray-400 py-10">
+                          <span className="text-3xl mb-2">🔍</span>
+                          <p className="text-xs font-medium">මෙම වර්ගයේ / නමින් භාණ්ඩයක් හම්බ වුනේ නැහැ</p>
+                        </div>
+                      )}
+                      {filteredBillingProducts.map((product) => {
+                        const discP = parseFloat(product.discount) || 0; 
+                        const finalPrice = product.price - (product.price * discP) / 100;
+                        const isLowStock = product.stock <= 5;
+                        
+                        return (
+                          <button 
+                            key={product._id} 
+                            onClick={() => addToCart(product)} 
+                            className={`p-3 rounded-xl shadow-sm text-left border relative transition-all active:scale-95 ${
+                              isLowStock 
+                                ? 'border-red-500 bg-red-100 text-red-900 animate-pulse ring-2 ring-red-400 shadow-md shadow-red-200' 
+                                : 'bg-white hover:border-blue-400'
+                            }`}
+                          >
+                            {discP > 0 && <span className="absolute top-1 right-1 bg-red-500 text-white text-[9px] px-1.5 rounded-full font-bold">{discP}% OFF</span>}
+                            <div className="font-bold text-slate-800 text-xs truncate">{product.name}</div>
+                            <div className="text-blue-600 font-black text-sm mt-1">රු. {finalPrice.toFixed(2)}</div>
+                            <div className={`text-[10px] font-bold mt-1 ${isLowStock ? 'text-red-700 bg-red-200 px-1 py-0.5 rounded w-fit' : 'text-gray-400'}`}>
+                              {isLowStock ? `⚠️ අඩු තොග (Low): ${product.stock}` : `තොග: ${product.stock}`} {product.unit || "Kg"}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -995,15 +1066,9 @@ useEffect(() => {
                         <div>
                           <label className="text-[11px] font-bold text-gray-600 block mb-1">භාණ්ඩයේ වර්ගය (Category):</label>
                           <select value={productForm.category} onChange={(e) => setProductForm({ ...productForm, category: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 text-gray-700 font-bold">
-                            <option value="Grocery">Grocery (සිල්ල​ර බඩු)</option>
-                            <option value="Vegetables">Vegetables (එළවළු)</option>
-                            <option value="Fruits">Fruits (පළතුරු)</option>
-                            <option value="Beverages">Beverages (බීම වර්ග)</option>
-                            <option value="Dairy">Dairy (කිරි නිෂ්පාදන)</option>
-                            <option value="Bakery">Bakery (පාන්/කේක්)</option>
-                            <option value="Cosmetics">Cosmetics (රූපලාවන්‍ය ද්‍ර​ව්‍ය)</option>
-                            <option value="Household">Household (ගෘහ උපකරණ)</option>
-                            <option value="Other">Other (වෙනත්)</option>
+                            {PRODUCT_CATEGORIES.map((cat) => (
+                              <option key={cat.value} value={cat.value}>{cat.icon} {cat.label}</option>
+                            ))}
                           </select>
                         </div>
                         <div>
@@ -1041,7 +1106,12 @@ useEffect(() => {
                           {filteredAdminProducts.map((p) => (
                             <tr key={p._id} className="hover:bg-slate-50/80">
                               <td className="p-3 font-bold text-slate-900">{p.name}</td>
-                              <td className="p-3 font-bold text-emerald-700">{p.category}</td>
+                              <td className="p-3">
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 whitespace-nowrap">
+                                  {(PRODUCT_CATEGORIES.find(c => c.value === (p.category || "Grocery")) || PRODUCT_CATEGORIES[0]).icon}{" "}
+                                  {p.category || "Grocery"}
+                                </span>
+                              </td>
                               <td className="p-3 text-gray-500">{p.barcode || "N/A"}</td>
                               <td className="p-3 text-right text-gray-500">රු. {p.marketPrice?.toFixed(2) || p.price?.toFixed(2)}</td>
                               <td className="p-3 text-right font-black text-blue-600">රු. {p.price.toFixed(2)}</td>
@@ -1238,7 +1308,7 @@ useEffect(() => {
           
           {paymentMethod === "Credit" && (
             <div className="flex justify-between text-red-600 font-bold border-t border-dashed pt-0.5">
-              <span>ගෙවීමට ඇති මුදල(Credit Due)</span>
+              <span>ණය පොතට (Credit Due)</span>
               <span>රු. {(calculateTotal() - (amountPaid === "" ? 0 : parseFloat(amountPaid))).toFixed(2)}</span>
             </div>
           )}
