@@ -3,7 +3,7 @@ import axios from "axios";
 import { db } from "./db";
 
 // 🛠️ HOSTING CONFIGURATION: Localhost සහ Render.com දෙකටම ගැලපෙන සේ පොදු URL එකක් සාදා ඇත
-// Render එකට දැමූ පසු "http://localhost:5008/api", "https://supermkt-pos-backend.onrender.com/api" වෙනුවට Render Live URL එක දමන්න
+// Render එකට දැමූ පසු "http://localhost:5008/api" වෙනුවට Render Live URL එක දමන්න
 const API_BASE_URL = "https://supermkt-pos-backend.onrender.com/api"; 
 
 // 🛠️ NEW: සියලුම Product Categories එකම තැනකින් manage කිරීමට (Admin dropdown + Billing sidebar දෙකටම use වේ)
@@ -87,7 +87,7 @@ function App() {
   // Product CRUD States
   const [isEditing, setIsEditing] = useState(false);
   const [editId, setEditId] = useState(null);
-  const [productForm, setProductForm] = useState({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery" });
+  const [productForm, setProductForm] = useState({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "" });
 
   // Emergency Temp Item Form State (For Any Role)
   const [tempItemForm, setTempItemForm] = useState({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
@@ -680,7 +680,9 @@ useEffect(() => {
       barcode: productForm.barcode,
       discount: parseFloat(productForm.discountPercent) || 0,
       unit: productForm.unit,
-      category: productForm.category
+      category: productForm.category,
+      minStockLevel: parseFloat(productForm.minStockLevel) || 5,
+      preferredSupplierId: productForm.preferredSupplierId || null
     };
     try {
       if (isEditing) {
@@ -692,7 +694,7 @@ useEffect(() => {
         await axios.post(`${API_BASE_URL}/products/add`, submissionData);
         showToast("අලුත් භාණ්ඩය සාර්ථකව ඩේටාබේස් එකට එකතු කලා! ✅");
       }
-      setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery" });
+      setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "" });
       fetchProducts();
     } catch (error) { showToast("ක්‍රියාවලිය අසාර්ථකයි!", "error"); }
   };
@@ -709,7 +711,9 @@ useEffect(() => {
       barcode: product.barcode || "",
       discountPercent: product.discount || "", 
       unit: product.unit || "Kg",
-      category: product.category || "Grocery"
+      category: product.category || "Grocery",
+      minStockLevel: product.minStockLevel ?? 5,
+      preferredSupplierId: product.preferredSupplierId || ""
     });
   };
 
@@ -741,6 +745,24 @@ useEffect(() => {
     p.name.toLowerCase().includes(adminProductSearch.toLowerCase()) || 
     (p.barcode && p.barcode.includes(adminProductSearch))
   );
+
+  // 🛠️ NEW (Step 3 - Low Stock Reorder Alert): අවම තොග මට්ටමට වඩා අඩු Products ලැයිස්තුව
+  const lowStockProducts = products.filter(p => p.stock <= (p.minStockLevel ?? 5));
+
+  // 🛠️ NEW: Low stock products, Preferred Supplier එක අනුව group කිරීම (Purchase Order Suggestion සඳහා)
+  const lowStockGroupedBySupplier = lowStockProducts.reduce((groups, p) => {
+    const key = p.preferredSupplierId || "unassigned";
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(p);
+    return groups;
+  }, {});
+
+  // 🛠️ NEW: Product එකකට Suggested Reorder Quantity එක ගණනය කිරීම (අවම මට්ටමෙන් දෙගුණයකට ළඟා වෙන්න ඕන ප්‍රමාණය)
+  const getSuggestedReorderQty = (p) => {
+    const min = p.minStockLevel ?? 5;
+    const suggestion = (min * 2) - p.stock;
+    return suggestion > 0 ? suggestion : min;
+  };
 
   if (!user) {
     return (
@@ -1105,7 +1127,7 @@ useEffect(() => {
                       {filteredBillingProducts.map((product) => {
                         const discP = parseFloat(product.discount) || 0; 
                         const finalPrice = product.price - (product.price * discP) / 100;
-                        const isLowStock = product.stock <= 5;
+                        const isLowStock = product.stock <= (product.minStockLevel ?? 5);
                         
                         return (
                           <button 
@@ -1141,6 +1163,12 @@ useEffect(() => {
                 <button onClick={() => setAdminSubTab("products")} className={`p-3 text-left font-bold ${adminSubTab === "products" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📦 තොග කළමනාකරණය</button>
                 <button onClick={() => setAdminSubTab("customers")} className={`p-3 text-left font-bold ${adminSubTab === "customers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👥 පාරිභෝගික පොත</button>
                 <button onClick={() => setAdminSubTab("suppliers")} className={`p-3 text-left font-bold ${adminSubTab === "suppliers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚚 සැපයුම්කරුවන්</button>
+                <button onClick={() => setAdminSubTab("reorder")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "reorder" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
+                  <span>🔔 Reorder Alerts</span>
+                  {lowStockProducts.length > 0 && (
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black ${adminSubTab === "reorder" ? "bg-white/20" : "bg-red-500 text-white animate-pulse"}`}>{lowStockProducts.length}</span>
+                  )}
+                </button>
                 <button onClick={() => setAdminSubTab("sales")} className={`p-3 text-left font-bold ${adminSubTab === "sales" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📊 විකුණුම් වාර්තා</button>
               </div>
 
@@ -1198,8 +1226,21 @@ useEffect(() => {
                           <label className="text-[11px] font-bold text-gray-600 block mb-1">විශේෂ වට්ටම් ප්‍රතිශතය (%):</label>
                           <input type="number" placeholder="0" value={productForm.discountPercent} onChange={(e) => setProductForm({ ...productForm, discountPercent: e.target.value })} className="w-full p-2 border rounded text-xs bg-red-50/50" />
                         </div>
+                        <div>
+                          <label className="text-[11px] font-bold text-gray-600 block mb-1">🔔 අවම තොග මට්ටම (Reorder Alert Level):</label>
+                          <input type="number" placeholder="5" value={productForm.minStockLevel} onChange={(e) => setProductForm({ ...productForm, minStockLevel: e.target.value })} className="w-full p-2 border rounded text-xs bg-purple-50/50 font-bold" />
+                        </div>
+                        <div>
+                          <label className="text-[11px] font-bold text-gray-600 block mb-1">🚚 Reorder කරන්නේ මේ Supplier ලගින් (Optional):</label>
+                          <select value={productForm.preferredSupplierId} onChange={(e) => setProductForm({ ...productForm, preferredSupplierId: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 text-gray-700">
+                            <option value="">තෝරලා නැත</option>
+                            {suppliers.map(s => (
+                              <option key={s._id} value={s._id}>{s.name}</option>
+                            ))}
+                          </select>
+                        </div>
                         <div className="col-span-2 md:col-span-4 flex justify-end gap-2 pt-2">
-                          {isEditing && <button type="button" onClick={() => { setIsEditing(false); setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery" }); }} className="bg-gray-500 text-white px-4 py-2 rounded text-xs font-bold">Cancel</button>}
+                          {isEditing && <button type="button" onClick={() => { setIsEditing(false); setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "" }); }} className="bg-gray-500 text-white px-4 py-2 rounded text-xs font-bold">Cancel</button>}
                           <button type="submit" className="bg-blue-600 text-white px-6 py-2 rounded text-xs font-bold shadow-md">{isEditing ? "යාවත්කාලීන කරන්න" : "ඩේටාබේස් එකට එකතු කරන්න"}</button>
                         </div>
                       </form>
@@ -1239,7 +1280,7 @@ useEffect(() => {
                               <td className="p-3 text-right text-gray-500">රු. {p.marketPrice?.toFixed(2) || p.price?.toFixed(2)}</td>
                               <td className="p-3 text-right font-black text-blue-600">රු. {p.price.toFixed(2)}</td>
                               <td className="p-3 text-right text-emerald-700">රු. {p.costPrice?.toFixed(2) || "0.00"}</td>
-                              <td className="p-3 text-center font-black"><span className={`px-2 py-0.5 rounded-sm ${p.stock > 5 ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600'}`}>{p.stock} {p.unit || 'Kg'}</span></td>
+                              <td className="p-3 text-center font-black"><span className={`px-2 py-0.5 rounded-sm ${p.stock > (p.minStockLevel ?? 5) ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600'}`}>{p.stock} {p.unit || 'Kg'}</span></td>
                               <td className="p-3 text-center text-red-500 font-bold">{p.discount || 0}% OFF</td>
                               <td className="p-3 text-center space-x-1.5">
                                 <button onClick={() => handleEditClick(p)} className="bg-amber-500 hover:bg-amber-600 text-white px-2 py-1 rounded text-[10px] font-bold">Edit</button>
@@ -1250,6 +1291,58 @@ useEffect(() => {
                         </tbody>
                       </table>
                     </div>
+                  </div>
+                )}
+
+                {/* 🛠️ NEW (Step 3 - Low Stock Reorder Alert + Purchase Order Suggestion) */}
+                {adminSubTab === "reorder" && (
+                  <div className="space-y-6">
+                    <div className="bg-white p-5 rounded-xl border shadow-xs">
+                      <h3 className="text-sm font-black uppercase text-slate-800 mb-1">🔔 Reorder Alerts</h3>
+                      <p className="text-xs text-gray-500">අවම තොග මට්ටමට වඩා අඩුවෙලා තියෙන භාණ්ඩ, Supplier අනුව Group කර පෙන්වයි</p>
+                    </div>
+
+                    {lowStockProducts.length === 0 ? (
+                      <div className="bg-white p-10 rounded-xl border shadow-xs flex flex-col items-center justify-center text-center">
+                        <span className="text-4xl mb-2">✅</span>
+                        <p className="text-sm font-bold text-slate-700">සියලුම භාණ්ඩ වල තොග ප්‍රමාණවත්!</p>
+                        <p className="text-xs text-gray-400 mt-1">Reorder කරන්න ඕන කිසිම භාණ්ඩයක් නැත</p>
+                      </div>
+                    ) : (
+                      Object.entries(lowStockGroupedBySupplier).map(([supplierKey, productsGroup]) => {
+                        const supplier = supplierKey !== "unassigned" ? suppliers.find(s => s._id === supplierKey) : null;
+                        return (
+                          <div key={supplierKey} className="bg-white rounded-xl border shadow-xs overflow-hidden">
+                            <div className="p-4 border-b bg-gray-50">
+                              <h4 className="text-xs font-black uppercase text-slate-800">
+                                {supplier ? `🚚 ${supplier.name}` : "❓ Supplier නොමැති භාණ්ඩ"}
+                              </h4>
+                              <p className="text-[10px] text-gray-400 mt-0.5">{productsGroup.length} භාණ්ඩයක් Reorder කරන්න ඕන</p>
+                            </div>
+                            <table className="w-full text-left border-collapse text-xs">
+                              <thead>
+                                <tr className="bg-slate-100 text-slate-700 font-bold border-b">
+                                  <th className="p-3">භාණ්ඩයේ නම</th>
+                                  <th className="p-3 text-center">වත්මන් තොගය</th>
+                                  <th className="p-3 text-center">අවම මට්ටම</th>
+                                  <th className="p-3 text-center">යෝජිත Reorder ප්‍රමාණය</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-100 font-medium">
+                                {productsGroup.map((p) => (
+                                  <tr key={p._id} className="hover:bg-red-50/40">
+                                    <td className="p-3 font-bold text-slate-900">{p.name}</td>
+                                    <td className="p-3 text-center"><span className="bg-red-100 text-red-600 px-2 py-0.5 rounded-full font-black">{p.stock} {p.unit || "Kg"}</span></td>
+                                    <td className="p-3 text-center text-gray-500">{p.minStockLevel ?? 5} {p.unit || "Kg"}</td>
+                                    <td className="p-3 text-center font-black text-emerald-700">{getSuggestedReorderQty(p)} {p.unit || "Kg"}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        );
+                      })
+                    )}
                   </div>
                 )}
 
