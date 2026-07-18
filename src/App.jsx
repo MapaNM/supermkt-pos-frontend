@@ -48,6 +48,19 @@ function App() {
   const [editCustomerId, setEditCustomerId] = useState(null);
   const [creditPayment, setCreditPayment] = useState({ customerId: "", amount: "" });
 
+  // 🛠️ NEW: Supplier Management States
+  const [suppliers, setSuppliers] = useState([]);
+  const [supplierForm, setSupplierForm] = useState({ name: "", phone: "", address: "" });
+  const [isEditingSupplier, setIsEditingSupplier] = useState(false);
+  const [editSupplierId, setEditSupplierId] = useState(null);
+  // 🛠️ UPDATED (Step 2 - GRN Multi-item): එකම Supplier Invoice එකකින් Products කිහිපයක් cart එකක් විදිහට එකතු කිරීමට
+  const [grnSupplierId, setGrnSupplierId] = useState("");
+  const [grnCurrentItem, setGrnCurrentItem] = useState({ productId: "", quantity: "", costPrice: "", stockMode: "add" });
+  const [grnItems, setGrnItems] = useState([]); // [{ productId, productName, unit, quantity, costPrice }]
+  const [grnDescription, setGrnDescription] = useState("");
+  const [viewSupplierDetails, setViewSupplierDetails] = useState(null); // 🛠️ NEW: Supplier details modal එකට (ledger history)
+  const [supplierPayment, setSupplierPayment] = useState({ supplierId: "", amount: "" });
+
   // 🛠️ NEW: Live Customer Search (Suggestions Dropdown) States
   const [customerSuggestions, setCustomerSuggestions] = useState([]);
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
@@ -102,6 +115,7 @@ function App() {
       fetchCustomers();
       if (user.role === "admin") {
         fetchSalesSummary();
+        fetchSuppliers();
       }
     }
   }, [user]);
@@ -266,6 +280,14 @@ useEffect(() => {
     } catch (error) { console.error(error); }
   };
 
+  // 🛠️ NEW: Suppliers ලබාගැනීම
+  const fetchSuppliers = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/suppliers`);
+      setSuppliers(response.data);
+    } catch (error) { console.error(error); }
+  };
+
   // --- CUSTOMER CRUD ---
   const handleCustomerSubmit = async (e) => {
     e.preventDefault();
@@ -347,6 +369,106 @@ useEffect(() => {
       setCreditPayment({ customerId: "", amount: "" });
       fetchCustomers();
     } catch (error) { showToast("ණය පියවීම අසාර්ථකයි!", "error"); }
+  };
+
+  // --- SUPPLIER CRUD ---
+  const handleSupplierSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      if (isEditingSupplier) {
+        await axios.put(`${API_BASE_URL}/suppliers/update/${editSupplierId}`, supplierForm);
+        setIsEditingSupplier(false);
+        setEditSupplierId(null);
+        showToast("සැපයුම්කරුගේ විස්තර සාර්ථකව යාවත්කාලීන කලා!");
+      } else {
+        await axios.post(`${API_BASE_URL}/suppliers/add`, supplierForm);
+        showToast("සැපයුම්කරු සාර්ථකව ඇතුලත් කලා! 🚚");
+      }
+      setSupplierForm({ name: "", phone: "", address: "" });
+      fetchSuppliers();
+    } catch (error) { showToast(error.response?.data?.message || "ක්‍රියාවලිය අසාර්ථකයි!", "error"); }
+  };
+
+  const handleEditSupplierClick = (supplier) => {
+    setIsEditingSupplier(true);
+    setEditSupplierId(supplier._id);
+    setSupplierForm({ name: supplier.name, phone: supplier.phone, address: supplier.address || "" });
+  };
+
+  const handleDeleteSupplierClick = async (id) => {
+    if (window.confirm("මෙම සැපයුම්කරුව මකා දැමීමට අවශ්‍ය බව විශ්වාසද? 🗑️")) {
+      try {
+        await axios.delete(`${API_BASE_URL}/suppliers/delete/${id}`);
+        showToast("මකා දැමීම සාර්ථකයි!");
+        fetchSuppliers();
+      } catch (error) { showToast("මකා දැමීම අසාර්ථකයි!", "error"); }
+    }
+  };
+
+  // 🛠️ UPDATED (Step 2 - GRN Multi-item): වත්මන් Row එක GRN List එකට එකතු කිරීම
+  const handleAddGrnItem = () => {
+    if (!grnCurrentItem.productId) {
+      return showToast("කරුණාකර භාණ්ඩයක් තෝරන්න!", "warning");
+    }
+    if (!grnCurrentItem.quantity || parseFloat(grnCurrentItem.quantity) <= 0) {
+      return showToast("නිවැරදි ප්‍රමාණයක් ඇතුලත් කරන්න!", "warning");
+    }
+    if (!grnCurrentItem.costPrice || parseFloat(grnCurrentItem.costPrice) <= 0) {
+      return showToast("නිවැරදි ගැනුම් මිලක් ඇතුලත් කරන්න!", "warning");
+    }
+
+    const product = products.find(p => p._id === grnCurrentItem.productId);
+    if (!product) return showToast("භාණ්ඩය සොයාගත නොහැක!", "error");
+
+    setGrnItems([...grnItems, {
+      productId: product._id,
+      productName: product.name,
+      unit: product.unit || "Kg",
+      quantity: parseFloat(grnCurrentItem.quantity),
+      costPrice: parseFloat(grnCurrentItem.costPrice),
+      stockMode: grnCurrentItem.stockMode || "add"
+    }]);
+
+    // Row එක reset කරයි, ඊළඟ item එක type කරන්න
+    setGrnCurrentItem({ productId: "", quantity: "", costPrice: "", stockMode: "add" });
+  };
+
+  // 🛠️ NEW: GRN List එකෙන් Item එකක් ඉවත් කිරීම
+  const handleRemoveGrnItem = (index) => {
+    setGrnItems(grnItems.filter((_, i) => i !== index));
+  };
+
+  // 🛠️ UPDATED (Step 2 - GRN Multi-item): List එකේ තියෙන Items ඔක්කොම එකවර Submit කිරීම
+  const handleSubmitGrn = async () => {
+    if (!grnSupplierId) return showToast("කරුණාකර සැපයුම්කරුවෙක් තෝරන්න!", "warning");
+    if (grnItems.length === 0) return showToast("අවම වශයෙන් භාණ්ඩයක් හෝ GRN List එකට එකතු කරන්න!", "warning");
+
+    try {
+      const response = await axios.post(`${API_BASE_URL}/suppliers/record-purchase/${grnSupplierId}`, {
+        items: grnItems.map(item => ({ productId: item.productId, quantity: item.quantity, costPrice: item.costPrice, stockMode: item.stockMode })),
+        description: grnDescription
+      });
+      showToast(response.data.message || "GRN එක සාර්ථකව සටහන් කලා! 📦");
+      setGrnSupplierId("");
+      setGrnItems([]);
+      setGrnCurrentItem({ productId: "", quantity: "", costPrice: "", stockMode: "add" });
+      setGrnDescription("");
+      fetchSuppliers();
+      fetchProducts(); // 🛠️ Stock එකත් Cost Price එකත් වෙනස් වුනු නිසා Products ලැයිස්තුවත් Refresh කරයි
+    } catch (error) { showToast(error.response?.data?.message || "සටහන් කිරීම අසාර්ථකයි!", "error"); }
+  };
+
+  // 🛠️ NEW: Supplier ට මුදල් ගෙවීම (Balance Due අඩු කරයි)
+  const handleSettleSupplierPayment = async (e) => {
+    e.preventDefault();
+    try {
+      await axios.post(`${API_BASE_URL}/suppliers/pay/${supplierPayment.supplierId}`, {
+        amount: supplierPayment.amount
+      });
+      showToast("ගෙවීම සාර්ථකව සටහන් කලා! 💵");
+      setSupplierPayment({ supplierId: "", amount: "" });
+      fetchSuppliers();
+    } catch (error) { showToast("ගෙවීම අසාර්ථකයි!", "error"); }
   };
 
   // --- BILLING LOGIC ---
@@ -967,8 +1089,8 @@ useEffect(() => {
                   </div>
 
                   {/* Search + Product Grid (scrolls independently from the sidebar) */}
-                  <div className="flex-1 flex flex-col gap-3 min-w-0 overflow-y-1 pr-1">
-                    <div className="relative top-0.5 z-10 bg-gray-100/95 backdrop-blur-sm pb-1 -mt-0.5">
+                  <div className="flex-1 flex flex-col gap-3 min-w-0 overflow-y-auto pr-1">
+                    <div className="relative top-0 z-10 bg-gray-100/95 backdrop-blur-sm pb-1 -mt-0.5">
                       <input type="text" placeholder="🔍  භාණ්ඩයේ නම හෝ බාර්කෝඩ් එක ඇතුලත් කරන්න..." value={billingSearch} onChange={(e) => setBillingSearch(e.target.value)} className="w-full p-2.5 pl-9 border rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-medium text-sm" />
                       <span className="absolute left-3 top-3 text-gray-400 text-sm">🔍</span>
                     </div>
@@ -1018,6 +1140,7 @@ useEffect(() => {
               <div className="w-48 bg-slate-800 text-gray-300 flex flex-col font-medium text-sm">
                 <button onClick={() => setAdminSubTab("products")} className={`p-3 text-left font-bold ${adminSubTab === "products" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📦 තොග කළමනාකරණය</button>
                 <button onClick={() => setAdminSubTab("customers")} className={`p-3 text-left font-bold ${adminSubTab === "customers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👥 පාරිභෝගික පොත</button>
+                <button onClick={() => setAdminSubTab("suppliers")} className={`p-3 text-left font-bold ${adminSubTab === "suppliers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚚 සැපයුම්කරුවන්</button>
                 <button onClick={() => setAdminSubTab("sales")} className={`p-3 text-left font-bold ${adminSubTab === "sales" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📊 විකුණුම් වාර්තා</button>
               </div>
 
@@ -1194,7 +1317,283 @@ useEffect(() => {
                   </div>
                 )}
 
-                {/* Dashboard Summary Reports tab */}
+                {/* 🛠️ NEW: Suppliers Sub-tab with Balance Due Ledger */}
+                {adminSubTab === "suppliers" && (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div className="space-y-6">
+                      {/* Add/Edit Supplier Form */}
+                      <div className="bg-white p-5 rounded-xl border shadow-xs h-fit">
+                        <h3 className="text-xs font-black uppercase text-slate-800 mb-4">{isEditingSupplier ? "🔄 සැපයුම්කරුගේ විස්තර වෙනස් කිරීම" : "➕ අලුත් සැපයුම්කරුවෙක් ලියාපදිංචි කිරීම"}</h3>
+                        <form onSubmit={handleSupplierSubmit} className="space-y-4">
+                          <div>
+                            <label className="text-[11px] font-bold text-gray-600 block mb-1">සැපයුම්කරුගේ නම:</label>
+                            <input type="text" required value={supplierForm.name} onChange={(e) => setSupplierForm({ ...supplierForm, name: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white" />
+                          </div>
+                          <div>
+                            <label className="text-[11px] font-bold text-gray-600 block mb-1">දුරකථන අංකය:</label>
+                            <input type="text" required value={supplierForm.phone} onChange={(e) => setSupplierForm({ ...supplierForm, phone: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white" />
+                          </div>
+                          <div>
+                            <label className="text-[11px] font-bold text-gray-600 block mb-1">ලිපිනය (Optional):</label>
+                            <input type="text" value={supplierForm.address} onChange={(e) => setSupplierForm({ ...supplierForm, address: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white" />
+                          </div>
+                          <div className="flex gap-2">
+                            {isEditingSupplier && <button type="button" onClick={() => { setIsEditingSupplier(false); setEditSupplierId(null); setSupplierForm({ name: "", phone: "", address: "" }); }} className="flex-1 bg-gray-500 text-white py-2 rounded text-xs font-bold">Cancel</button>}
+                            <button type="submit" className="flex-1 bg-blue-600 text-white py-2 rounded text-xs font-bold shadow-md">{isEditingSupplier ? "යාවත්කාලීන කරන්න" : "ගිණුම සාදන්න"}</button>
+                          </div>
+                        </form>
+                      </div>
+
+                      {/* 🛠️ UPDATED (Step 2 - GRN Multi-item): Cart-style Stock ලැබීම් සටහන් කිරීම */}
+                      <div className="bg-white p-5 rounded-xl border shadow-xs h-fit">
+                        <h3 className="text-xs font-black uppercase text-amber-700 mb-3">📦 Stock ලැබීමක් සටහන් කිරීම (GRN)</h3>
+                        <p className="text-[10px] text-gray-500 mb-3">එකම Invoice එකකින් ලැබුණු භාණ්ඩ කිහිපයම මෙතනින් එකතු කරන්න — අන්තිමට එකවර Submit කරන්න.</p>
+
+                        <div className="space-y-3">
+                          <select value={grnSupplierId} onChange={(e) => setGrnSupplierId(e.target.value)} className="w-full p-2 border rounded text-xs bg-gray-50 text-gray-700 font-bold">
+                            <option value="">සැපයුම්කරු තෝරන්න...</option>
+                            {suppliers.map(s => (
+                              <option key={s._id} value={s._id}>{s.name} (ගෙවීමට ඇත: රු.{s.balanceDue?.toFixed(2)})</option>
+                            ))}
+                          </select>
+
+                          {/* Add Item Row */}
+                          <div className="bg-amber-50/60 border border-amber-200 rounded-lg p-3 space-y-2">
+                            <select
+                              value={grnCurrentItem.productId}
+                              onChange={(e) => {
+                                const selectedProduct = products.find(p => p._id === e.target.value);
+                                setGrnCurrentItem({
+                                  ...grnCurrentItem,
+                                  productId: e.target.value,
+                                  // 🛠️ භාණ්ඩය තෝරාගත් සැණින්, දැනට තියෙන Cost Price එක auto-fill වේ
+                                  costPrice: selectedProduct ? String(selectedProduct.costPrice || "") : ""
+                                });
+                              }}
+                              className="w-full p-2 border rounded text-xs bg-white text-gray-700 font-bold"
+                            >
+                              <option value="">භාණ්ඩය තෝරන්න...</option>
+                              {products.map(p => (
+                                <option key={p._id} value={p._id}>{p.name} (වත්මන් තොගය: {p.stock} {p.unit || "Kg"})</option>
+                              ))}
+                            </select>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="text-[10px] font-bold text-gray-500 block mb-1">ලැබුණු ප්‍රමාණය:</label>
+                                <input type="number" step="0.001" placeholder="Qty" value={grnCurrentItem.quantity} onChange={(e) => setGrnCurrentItem({ ...grnCurrentItem, quantity: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-slate-800 bg-white" />
+                              </div>
+                              <div>
+                                <label className="text-[10px] font-bold text-gray-500 block mb-1">ගැනුම් මිල (රු./ඒකකයට):</label>
+                                <input type="number" step="0.01" placeholder="Cost Price" value={grnCurrentItem.costPrice} onChange={(e) => setGrnCurrentItem({ ...grnCurrentItem, costPrice: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-amber-700 bg-white" />
+                              </div>
+                            </div>
+
+                            {/* 🛠️ NEW: Stock Mode Toggle - Add (එකතු කරන්න) vs Set (ලෙස සකසන්න / Overwrite) */}
+                            <div>
+                              <label className="text-[10px] font-bold text-gray-500 block mb-1">වත්මන් තොගයට කරන්නේ:</label>
+                              <div className="grid grid-cols-2 gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setGrnCurrentItem({ ...grnCurrentItem, stockMode: "add" })}
+                                  className={`py-1.5 rounded text-[10px] font-bold border transition-all ${
+                                    grnCurrentItem.stockMode === "add"
+                                      ? "bg-blue-600 text-white border-blue-600"
+                                      : "bg-white text-gray-600 border-gray-300"
+                                  }`}
+                                >
+                                  ➕ එකතු කරන්න (Add)
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setGrnCurrentItem({ ...grnCurrentItem, stockMode: "set" })}
+                                  className={`py-1.5 rounded text-[10px] font-bold border transition-all ${
+                                    grnCurrentItem.stockMode === "set"
+                                      ? "bg-purple-600 text-white border-purple-600"
+                                      : "bg-white text-gray-600 border-gray-300"
+                                  }`}
+                                >
+                                  🔄 මෙයට සකසන්න (Set)
+                                </button>
+                              </div>
+                              {grnCurrentItem.stockMode === "set" && (
+                                <p className="text-[9px] text-purple-600 font-bold mt-1">⚠️ වත්මන් තොගය සම්පූර්ණයෙන් මෙම ප්‍රමාණයට replace වේ (Opening Stock / Correction සඳහා පමණි)</p>
+                              )}
+                            </div>
+
+                            <button type="button" onClick={handleAddGrnItem} className="w-full bg-amber-600 hover:bg-amber-700 text-white py-1.5 rounded text-xs font-bold transition-all">➕ List එකට එකතු කරන්න</button>
+                          </div>
+
+                          {/* Added Items List */}
+                          {grnItems.length > 0 && (
+                            <div className="border rounded-lg overflow-hidden">
+                              <div className="bg-slate-100 px-3 py-1.5 text-[10px] font-black text-slate-600 uppercase">GRN List ({grnItems.length} Items)</div>
+                              <div className="divide-y divide-gray-100 max-h-48 overflow-y-auto">
+                                {grnItems.map((item, index) => (
+                                  <div key={index} className="flex items-center justify-between px-3 py-2 text-xs">
+                                    <div className="flex-1">
+                                      <p className="font-bold text-slate-800">
+                                        {item.productName}
+                                        {item.stockMode === "set" && (
+                                          <span className="ml-1.5 text-[8px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-black align-middle">SET</span>
+                                        )}
+                                      </p>
+                                      <p className="text-[10px] text-gray-500">{item.quantity} {item.unit} × රු.{item.costPrice.toFixed(2)}</p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-black text-amber-700">රු.{(item.quantity * item.costPrice).toFixed(2)}</span>
+                                      <button type="button" onClick={() => handleRemoveGrnItem(index)} className="text-red-400 hover:text-red-600 font-bold px-1">✕</button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="bg-amber-50 border-t border-amber-200 px-3 py-2 flex justify-between items-center">
+                                <span className="text-[11px] font-bold text-amber-800">මුළු ගණන (Grand Total):</span>
+                                <span className="text-sm font-black text-amber-900">රු. {grnItems.reduce((sum, item) => sum + (item.quantity * item.costPrice), 0).toFixed(2)}</span>
+                              </div>
+                            </div>
+                          )}
+
+                          <input type="text" placeholder="Invoice අංකය / සටහන (Optional)" value={grnDescription} onChange={(e) => setGrnDescription(e.target.value)} className="w-full p-2 border rounded text-xs" />
+
+                          <button type="button" onClick={handleSubmitGrn} disabled={grnItems.length === 0 || !grnSupplierId} className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white py-2 rounded text-xs font-bold transition-all">✅ GRN එක සම්පූර්ණයෙන් Submit කරන්න</button>
+                        </div>
+                      </div>
+
+                      {/* Settle Supplier Payment (Balance Due අඩු කිරීම) */}
+                      <div className="bg-white p-5 rounded-xl border shadow-xs h-fit">
+                        <h3 className="text-xs font-black uppercase text-emerald-700 mb-3">💵 සැපයුම්කරුට මුදල් ගෙවීම</h3>
+                        <form onSubmit={handleSettleSupplierPayment} className="space-y-3">
+                          <select required value={supplierPayment.supplierId} onChange={(e) => setSupplierPayment({ ...supplierPayment, supplierId: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 text-gray-700 font-bold">
+                            <option value="">සැපයුම්කරු තෝරන්න...</option>
+                            {suppliers.map(s => (
+                              <option key={s._id} value={s._id}>{s.name} (ගෙවීමට ඇත: රු.{s.balanceDue?.toFixed(2)})</option>
+                            ))}
+                          </select>
+                          <input type="number" required placeholder="ගෙවන ලද මුදල (රු.)" value={supplierPayment.amount} onChange={(e) => setSupplierPayment({ ...supplierPayment, amount: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-emerald-700" />
+                          <button type="submit" className="w-full bg-emerald-600 text-white py-2 rounded text-xs font-bold">ගෙවීම සටහන් කරන්න 🎉</button>
+                        </form>
+                      </div>
+                    </div>
+
+                    {/* Suppliers Table */}
+                    <div className="bg-white rounded-xl border shadow-xs overflow-hidden lg:col-span-2 h-fit">
+                      <div className="p-4 border-b bg-gray-50">
+                        <h3 className="text-xs font-black uppercase text-slate-800">🚚 ලියාපදිංචි සැපයුම්කරුවන් ({suppliers.length} Suppliers)</h3>
+                        <p className="text-[10px] text-gray-400 mt-0.5">💡 සම්පූර්ණ ගණුදෙනු ඉතිහාසය බැලීමට, Supplier කෙනෙක් click කරන්න</p>
+                      </div>
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-100 text-slate-700 font-bold border-b">
+                            <th className="p-3">සැපයුම්කරු නම</th>
+                            <th className="p-3">දුරකථන අංකය</th>
+                            <th className="p-3">ලිපිනය</th>
+                            <th className="p-3 text-right">අප ගෙවීමට ඇති මුදල</th>
+                            <th className="p-3 text-center">ක්‍රියාවන්</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 font-medium">
+                          {suppliers.length === 0 && (
+                            <tr><td colSpan="5" className="p-6 text-center text-gray-400">තවම සැපයුම්කරුවන් ලියාපදිංචි කර නැත</td></tr>
+                          )}
+                          {suppliers.map((s) => (
+                            <tr key={s._id} onClick={() => setViewSupplierDetails(s)} className="hover:bg-blue-50/60 cursor-pointer transition-colors">
+                              <td className="p-3 font-bold text-slate-900 hover:text-blue-600 hover:underline">{s.name}</td>
+                              <td className="p-3 text-gray-500">{s.phone}</td>
+                              <td className="p-3 text-gray-500">{s.address || "-"}</td>
+                              <td className="p-3 text-right font-black text-red-600">රු. {s.balanceDue?.toFixed(2) || "0.00"}</td>
+                              <td className="p-3 text-center space-x-1.5">
+                                <button onClick={(e) => { e.stopPropagation(); handleEditSupplierClick(s); }} className="bg-amber-500 text-white px-2 py-1 rounded text-[10px] font-bold">Edit</button>
+                                <button onClick={(e) => { e.stopPropagation(); handleDeleteSupplierClick(s._id); }} className="bg-red-600 text-white px-2 py-1 rounded text-[10px] font-bold">Delete</button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* 🛠️ NEW: Supplier Details Modal - සම්පූර්ණ Purchase/Payment Ledger History එක */}
+                {viewSupplierDetails && (
+                  <div
+                    className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+                    onClick={() => setViewSupplierDetails(null)}
+                  >
+                    <div
+                      className="bg-white rounded-xl border border-gray-200 shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col relative"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {/* Header */}
+                      <div className="p-4 border-b bg-slate-900 text-white rounded-t-xl flex justify-between items-start">
+                        <div>
+                          <h3 className="text-sm font-black flex items-center gap-1.5">🚚 {viewSupplierDetails.name}</h3>
+                          <p className="text-[11px] text-gray-300 mt-0.5">{viewSupplierDetails.phone}{viewSupplierDetails.address ? ` • ${viewSupplierDetails.address}` : ""}</p>
+                        </div>
+                        <button onClick={() => setViewSupplierDetails(null)} className="text-gray-300 hover:text-white font-black text-lg leading-none">✕</button>
+                      </div>
+
+                      {/* Balance Summary */}
+                      <div className="p-4 bg-red-50 border-b border-red-100 flex justify-between items-center">
+                        <span className="text-xs font-bold text-red-700">දැනට අප ගෙවීමට ඇති මුදල (Balance Due):</span>
+                        <span className="text-lg font-black text-red-700">රු. {viewSupplierDetails.balanceDue?.toFixed(2) || "0.00"}</span>
+                      </div>
+
+                      {/* Ledger History (newest first) */}
+                      <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
+                        <h4 className="text-[10px] font-black uppercase text-gray-400 mb-1">ගණුදෙනු ඉතිහාසය (Transaction History)</h4>
+
+                        {(!viewSupplierDetails.ledger || viewSupplierDetails.ledger.length === 0) && (
+                          <p className="text-xs text-gray-400 text-center py-8">තවම ගණුදෙනු කිසිවක් සටහන් වී නැත</p>
+                        )}
+
+                        {[...(viewSupplierDetails.ledger || [])]
+                          .sort((a, b) => new Date(b.date) - new Date(a.date))
+                          .map((entry, index) => (
+                            <div
+                              key={index}
+                              className={`p-3 rounded-lg border ${
+                                entry.type === "purchase" ? "bg-amber-50 border-amber-200" : "bg-emerald-50 border-emerald-200"
+                              }`}
+                            >
+                              <div className="flex justify-between items-start">
+                                <div>
+                                  <span className={`text-[10px] font-black uppercase px-1.5 py-0.5 rounded-full ${
+                                    entry.type === "purchase" ? "bg-amber-200 text-amber-800" : "bg-emerald-200 text-emerald-800"
+                                  }`}>
+                                    {entry.type === "purchase" ? "📦 Stock ලැබීම" : "💵 ගෙවීම"}
+                                  </span>
+                                  <p className="text-[10px] text-gray-500 mt-1">{new Date(entry.date).toLocaleString()}</p>
+                                </div>
+                                <span className={`text-sm font-black ${entry.type === "purchase" ? "text-amber-800" : "text-emerald-700"}`}>
+                                  {entry.type === "purchase" ? "+" : "-"} රු. {entry.amount?.toFixed(2)}
+                                </span>
+                              </div>
+
+                              {entry.description && (
+                                <p className="text-[11px] text-gray-600 mt-1.5 italic">{entry.description}</p>
+                              )}
+
+                              {/* Purchase items breakdown */}
+                              {entry.items && entry.items.length > 0 && (
+                                <div className="mt-2 bg-white/70 rounded border border-amber-100 divide-y divide-amber-100">
+                                  {entry.items.map((it, i) => (
+                                    <div key={i} className="flex justify-between px-2 py-1 text-[10px]">
+                                      <span className="text-gray-700 font-medium">
+                                        {it.productName} <span className="text-gray-400">({it.quantity} × රු.{it.costPrice?.toFixed(2)})</span>
+                                        {it.stockMode === "set" && <span className="ml-1 text-[8px] bg-purple-100 text-purple-700 px-1 rounded-full font-black">SET</span>}
+                                      </span>
+                                      <span className="font-bold text-gray-800">රු.{it.subtotal?.toFixed(2)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
                 {adminSubTab === "sales" && (
                   <div className="space-y-6">
                     {/* Top Stat Boxes Widget */}
