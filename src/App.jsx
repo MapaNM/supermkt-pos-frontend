@@ -60,6 +60,7 @@ function App() {
   const [grnItems, setGrnItems] = useState([]); // [{ productId, productName, unit, quantity, costPrice }]
   const [grnDescription, setGrnDescription] = useState("");
   const [viewSupplierDetails, setViewSupplierDetails] = useState(null); // 🛠️ NEW: Supplier details modal එකට (ledger history)
+  const [viewCustomerDetails, setViewCustomerDetails] = useState(null); // 🆕 Customer credit ledger modal එකට (customer _id)
   const [supplierPayment, setSupplierPayment] = useState({ supplierId: "", amount: "" });
 
   // 🛠️ NEW: Live Customer Search (Suggestions Dropdown) States
@@ -973,6 +974,7 @@ useEffect(() => {
 
   // 🛠️ NEW (Step 3 - Low Stock Reorder Alert): අවම තොග මට්ටමට වඩා අඩු Products ලැයිස්තුව
   const lowStockProducts = products.filter(p => p.stock <= (p.minStockLevel ?? 5));
+  const activeCustomerDetails = viewCustomerDetails ? customers.find(c => c._id === viewCustomerDetails) : null;
 
   // 🛠️ NEW: Low stock products, Preferred Supplier එක අනුව group කිරීම (Purchase Order Suggestion සඳහා)
   const lowStockGroupedBySupplier = lowStockProducts.reduce((groups, p) => {
@@ -1995,16 +1997,16 @@ useEffect(() => {
                         </thead>
                         <tbody className="divide-y divide-gray-100 font-medium">
                           {customers.map((c) => (
-                            <tr key={c._id} className="hover:bg-slate-50/80">
-                              <td className="p-3 font-bold text-slate-900">{c.name}</td>
-                              <td className="p-3 text-gray-500">{c.phone}</td>
-                              <td className="p-3 text-right font-black text-red-600">රු. {c.creditBalance?.toFixed(2) || "0.00"}</td>
-                              <td className="p-3 text-center space-x-1.5">
-                                <button onClick={() => handleEditCustomerClick(c)} className="bg-amber-500 text-white px-2 py-1 rounded text-[10px] font-bold">Edit</button>
-                                <button onClick={() => handleDeleteCustomerClick(c._id)} className="bg-red-600 text-white px-2 py-1 rounded text-[10px] font-bold">Delete</button>
-                              </td>
-                            </tr>
-                          ))}
+                              <tr key={c._id} onClick={() => setViewCustomerDetails(c._id)} className="hover:bg-blue-50/60 cursor-pointer transition-colors">
+                                <td className="p-3 font-bold text-slate-900 hover:text-blue-600 hover:underline">{c.name}</td>
+                                <td className="p-3 text-gray-500">{c.phone}</td>
+                                <td className="p-3 text-right font-black text-red-600">රු. {c.creditBalance?.toFixed(2) || "0.00"}</td>
+                                <td className="p-3 text-center space-x-1.5">
+                                  <button onClick={(e) => { e.stopPropagation(); handleEditCustomerClick(c); }} className="bg-amber-500 text-white px-2 py-1 rounded text-[10px] font-bold">Edit</button>
+                                  <button onClick={(e) => { e.stopPropagation(); handleDeleteCustomerClick(c._id); }} className="bg-red-600 text-white px-2 py-1 rounded text-[10px] font-bold">Delete</button>
+                                </td>
+                              </tr>
+                            ))}
                         </tbody>
                       </table>
                     </div>
@@ -2288,6 +2290,61 @@ useEffect(() => {
                     </div>
                   </div>
                 )}
+                {/* 🆕 Customer Credit Ledger Modal */}
+{activeCustomerDetails && (
+  <div
+    className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+    onClick={() => setViewCustomerDetails(null)}
+  >
+    <div
+      className="bg-white rounded-xl border border-gray-200 shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col relative"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="p-4 border-b bg-slate-900 text-white rounded-t-xl flex justify-between items-start">
+        <div>
+          <h3 className="text-sm font-black flex items-center gap-1.5">👤 {activeCustomerDetails.name}</h3>
+          <p className="text-[11px] text-gray-300 mt-0.5">{activeCustomerDetails.phone}</p>
+        </div>
+        <button onClick={() => setViewCustomerDetails(null)} className="text-gray-300 hover:text-white font-black text-lg leading-none">✕</button>
+      </div>
+
+      <div className="p-4 bg-red-50 border-b border-red-100 flex justify-between items-center">
+        <span className="text-xs font-bold text-red-700">දැනට තියෙන මුළු ණය හිඟය:</span>
+        <span className="text-lg font-black text-red-700">රු. {activeCustomerDetails.creditBalance?.toFixed(2) || "0.00"}</span>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
+        <h4 className="text-[10px] font-black uppercase text-gray-400 mb-1">ණය ගණුදෙනු ඉතිහාසය (Credit History)</h4>
+
+        {(!activeCustomerDetails.creditHistory || activeCustomerDetails.creditHistory.length === 0) && (
+          <p className="text-xs text-gray-400 text-center py-8">තවම ණය ගණුදෙනු කිසිවක් සටහන් වී නැත</p>
+        )}
+
+        {[...(activeCustomerDetails.creditHistory || [])]
+          .sort((a, b) => new Date(b.date) - new Date(a.date))
+          .map((entry, index) => {
+            const isCreditGiven = entry.amount >= 0;
+            return (
+              <div key={index} className={`p-3 rounded-lg border ${isCreditGiven ? "bg-red-50 border-red-200" : "bg-emerald-50 border-emerald-200"}`}>
+                <div className="flex justify-between items-start">
+                  <div>
+                    <span className={`text-[10px] font-black uppercase px-1.5 py-0.5 rounded-full ${isCreditGiven ? "bg-red-200 text-red-800" : "bg-emerald-200 text-emerald-800"}`}>
+                      {isCreditGiven ? "📕 ණයට ගත්තා" : "💵 ගෙවීම / සරිකිරීම"}
+                    </span>
+                    <p className="text-[10px] text-gray-500 mt-1">{new Date(entry.date).toLocaleString()}</p>
+                  </div>
+                  <span className={`text-sm font-black ${isCreditGiven ? "text-red-700" : "text-emerald-700"}`}>
+                    {isCreditGiven ? "+" : "-"} රු. {Math.abs(entry.amount).toFixed(2)}
+                  </span>
+                </div>
+                {entry.description && <p className="text-[11px] text-gray-600 mt-1.5 italic">{entry.description}</p>}
+              </div>
+            );
+          })}
+      </div>
+    </div>
+  </div>
+)}
                 {adminSubTab === "sales" && (
                   <div className="space-y-6">
                     {/* Top Stat Boxes Widget */}
