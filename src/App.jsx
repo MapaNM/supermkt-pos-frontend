@@ -4,8 +4,8 @@ import axios from "axios";
 import { db } from "./db";
 
 // 🛠️ HOSTING CONFIGURATION: Localhost සහ Render.com දෙකටම ගැලපෙන සේ පොදු URL එකක් සාදා ඇත
-// Render එකට දැමූ පසු "http://localhost:5008/api" වෙනුවට Render Live URL එක දමන්න
-const API_BASE_URL = "http://localhost:5008/api"; 
+// Render එකට දැමූ පසු "http://localhost:5008/api", https://supermkt-pos-backend.onrender.com/api වෙනුවට Render Live URL එක දමන්න
+const API_BASE_URL = "https://supermkt-pos-backend.onrender.com/api"; 
 
 // 🛠️ NEW: සියලුම Product Categories එකම තැනකින් manage කිරීමට (Admin dropdown + Billing sidebar දෙකටම use වේ)
 const PRODUCT_CATEGORIES = [
