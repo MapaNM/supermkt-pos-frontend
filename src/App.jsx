@@ -1,9 +1,10 @@
 import { useState, useEffect } from "react";
+import { flushSync } from "react-dom";
 import axios from "axios";
 import { db } from "./db";
 
 // 🛠️ HOSTING CONFIGURATION: Localhost සහ Render.com දෙකටම ගැලපෙන සේ පොදු URL එකක් සාදා ඇත
-// Render එකට දැමූ පසු "http://localhost:5008/api" වෙනුවට Render Live URL එක දමන්න
+// Render එකට දැමූ පසු "http://localhost:5008/api", https://supermkt-pos-backend.onrender.com/api වෙනුවට Render Live URL එක දමන්න
 const API_BASE_URL = "https://supermkt-pos-backend.onrender.com/api"; 
 
 // 🛠️ NEW: සියලුම Product Categories එකම තැනකින් manage කිරීමට (Admin dropdown + Billing sidebar දෙකටම use වේ)
@@ -87,7 +88,27 @@ function App() {
   // Product CRUD States
   const [isEditing, setIsEditing] = useState(false);
   const [editId, setEditId] = useState(null);
-  const [productForm, setProductForm] = useState({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "" });
+  const [productForm, setProductForm] = useState({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "", expiryDate: "" });
+
+  // 🆕 RETURN / REFUND / EXCHANGE States
+  const [returnInvoiceSearch, setReturnInvoiceSearch] = useState("");
+  const [returnSaleData, setReturnSaleData] = useState(null); // Server එකෙන් ආපු පැරණි බිල
+  const [returnSelections, setReturnSelections] = useState({}); // { [itemId]: { qty, reason, checked } }
+  const [refundMethod, setRefundMethod] = useState("Cash");
+  const [isExchangeMode, setIsExchangeMode] = useState(false);
+  const [exchangeCart, setExchangeCart] = useState([]); // Exchange එකේදී අලුතින් දෙන භාණ්ඩ
+  const [exchangeCashReceived, setExchangeCashReceived] = useState("");
+  const [exchangePaymentMethod, setExchangePaymentMethod] = useState("Cash");
+  const [returnLoading, setReturnLoading] = useState(false);
+  const [returnHistory, setReturnHistory] = useState([]);
+  const [exchangeProductSearch, setExchangeProductSearch] = useState("");
+
+  // 🆕 EXPIRY TRACKING State
+  const [expiringProducts, setExpiringProducts] = useState([]);
+
+  // 🆕 PRINT RECEIPT: අන්තිමට Checkout කරපු Sale එකේ Professional Invoice Number එක (Return search එකට use වෙන්නේ මේකයි)
+  const [lastInvoiceNo, setLastInvoiceNo] = useState(null);
+  const [lastSaleIsOffline, setLastSaleIsOffline] = useState(false);
 
   // Emergency Temp Item Form State (For Any Role)
   const [tempItemForm, setTempItemForm] = useState({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
@@ -116,7 +137,9 @@ function App() {
       if (user.role === "admin") {
         fetchSalesSummary();
         fetchSuppliers();
+        fetchReturnHistory();
       }
+      fetchExpiringProducts();
     }
   }, [user]);
 
@@ -285,6 +308,22 @@ useEffect(() => {
     try {
       const response = await axios.get(`${API_BASE_URL}/suppliers`);
       setSuppliers(response.data);
+    } catch (error) { console.error(error); }
+  };
+
+  // 🆕 Expire වෙන / වෙච්ච භාණ්ඩ ලබාගැනීම (ඉදිරි දින 7 ඇතුලත)
+  const fetchExpiringProducts = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/products/expiring?days=7`);
+      setExpiringProducts(response.data);
+    } catch (error) { console.error(error); }
+  };
+
+  // 🆕 Return/Exchange History ලබාගැනීම (Admin Reporting)
+  const fetchReturnHistory = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/products/returns`);
+      setReturnHistory(response.data);
     } catch (error) { console.error(error); }
   };
 
@@ -473,6 +512,15 @@ useEffect(() => {
 
   // --- BILLING LOGIC ---
   const addToCart = (product) => {
+    // 🆕 EXPIRY CHECK: කල් ඉකුත් වූ භාණ්ඩයක් විකිණීමට ඉඩ නොදේ
+    const expiryStatus = getExpiryStatus(product);
+    if (expiryStatus === "expired") {
+      return showToast(`🚫 "${product.name}" කල් ඉකුත් වී ඇත! (${new Date(product.expiryDate).toLocaleDateString()}) - මෙය විකිණීමට ඉඩ නොදේ.`, "error");
+    }
+    if (expiryStatus === "expiring") {
+      showToast(`⚠️ "${product.name}" ළඟදීම කල් ඉකුත් වේ (${new Date(product.expiryDate).toLocaleDateString()})! අවධානයෙන් විකුණන්න.`, "warning");
+    }
+
     const existingIndex = cart.findIndex((item) => item._id === product._id);
     if (existingIndex !== -1) {
       const newCart = [...cart];
@@ -594,8 +642,16 @@ useEffect(() => {
 
     try {
       // 🌐 ONLINE: සර්වර් එකට දත්ත යැවීමට උත්සාහ කරයි
-      await axios.post(`${API_BASE_URL}/products/checkout`, checkoutData);
-      
+      const checkoutResponse = await axios.post(`${API_BASE_URL}/products/checkout`, checkoutData);
+
+      // 🆕 සර්වරයෙන් ආපු Professional Invoice Number එක Receipt එකේ Print කරන්න Save කරගන්නවා
+      // 🛠️ flushSync භාවිතා කරන්නේ React State එක Print කරන්න කලින්ම DOM එකට Force කරලා update කරන්න -
+      //     නැත්නම් window.print() එක State update එක DOM එකට එන්න කලින් Run වෙලා "N/A" පෙන්නයි!
+      flushSync(() => {
+        setLastInvoiceNo(checkoutResponse.data.invoiceNo || null);
+        setLastSaleIsOffline(false);
+      });
+
       window.print();
       resetBillingUI();
       showToast("ඉන්වොයිසිය සාර්ථකව මුද්‍රණය කලා! 🖨️✨");
@@ -610,6 +666,12 @@ useEffect(() => {
             ...checkoutData,
             createdAt: new Date().toISOString(),
             status: "pending"
+          });
+
+          // 🆕 Offline බිලකට තාවකාලික Reference එකක් පමණි - Sync වුනාට පස්සේ විතරක් සැබෑ Invoice Number එකක් ලැබෙන්නේ
+          flushSync(() => {
+            setLastInvoiceNo(`OFFLINE-${Date.now()}`);
+            setLastSaleIsOffline(true);
           });
 
           window.print(); 
@@ -651,6 +713,166 @@ useEffect(() => {
     }
   };
 
+  // --- RETURN / REFUND / EXCHANGE LOGIC ---
+
+  // Invoice අංකයෙන් පැරණි බිල සොයාගැනීම
+  const handleSearchInvoiceForReturn = async (e, idOverride) => {
+    if (e && e.preventDefault) e.preventDefault();
+    // 🛠️ idOverride එකක් දුන්නොත් (Sales Report එකේ "🔄 Return" Button එකෙන් වගේ), ඒක Priority ගන්නවා -
+    //     setReturnInvoiceSearch() කරලා ක්ෂණිකවම Search කිරීමේදී React state stale වීමේ ගැටලුව මගහරවා ගන්න
+    const rawId = idOverride ?? returnInvoiceSearch;
+    if (!rawId || !rawId.trim()) return showToast("කරුණාකර බිල්පත් අංකය ඇතුලත් කරන්න!", "warning");
+    setReturnLoading(true);
+    try {
+      // 🛠️ FIX: "#" සලකුණ URL එකේ "Fragment" (Anchor) සලකුණක් විදිහට සලකන නිසා,
+      //          # ට පස්සේ තියෙන කොටස Server එකට යවන්නවත් කලින් Browser එකෙන්ම කපා දානවා!
+      //          ඒ නිසා Request එක යවන්න කලින්ම # ඉවත් කරලා, encodeURIComponent කරලා Safe කරගන්නවා.
+      const cleanId = rawId.trim().replace(/^#/, "");
+      const response = await axios.get(`${API_BASE_URL}/products/invoice/${encodeURIComponent(cleanId)}`);
+      setReturnSaleData(response.data);
+      setReturnSelections({});
+      showToast("බිල්පත සාර්ථකව හමු විය! 🧾");
+    } catch (error) {
+      setReturnSaleData(null);
+      showToast(error.response?.data?.message || "මෙම බිල්පත් අංකය සොයාගත නොහැක!", "error");
+    } finally {
+      setReturnLoading(false);
+    }
+  };
+
+  // Return කරන Item එකක Qty/Reason වෙනස් කිරීම
+  const handleReturnSelectionChange = (itemId, field, value) => {
+    setReturnSelections((prev) => ({
+      ...prev,
+      [itemId]: { ...prev[itemId], [field]: value }
+    }));
+  };
+
+  // තෝරාගත් items වලින් Refund වන මුළු මුදල ගණනය කිරීම
+  const calculateReturnTotal = () => {
+    if (!returnSaleData) return 0;
+    return returnSaleData.items.reduce((sum, item) => {
+      const sel = returnSelections[item._id];
+      const qty = parseFloat(sel?.qty) || 0;
+      const available = item.qty - (item.returnedQty || 0);
+      const safeQty = Math.min(qty, available);
+      return sum + (safeQty * item.price);
+    }, 0);
+  };
+
+  // Exchange Cart එකට අලුත් භාණ්ඩයක් එකතු කිරීම
+  const addToExchangeCart = (product) => {
+    const existingIndex = exchangeCart.findIndex((item) => item._id === product._id);
+    if (existingIndex !== -1) {
+      const newCart = [...exchangeCart];
+      newCart[existingIndex].qty = parseFloat(newCart[existingIndex].qty) + 1;
+      setExchangeCart(newCart);
+    } else {
+      setExchangeCart([...exchangeCart, { ...product, qty: 1 }]);
+    }
+  };
+
+  const removeFromExchangeCart = (id) => setExchangeCart(exchangeCart.filter((c) => c._id !== id));
+
+  const calculateExchangeCartTotal = () => exchangeCart.reduce((sum, item) => {
+    const discP = parseFloat(item.discountPercent || item.discount) || 0;
+    const finalPrice = item.price - (item.price * discP) / 100;
+    return sum + (finalPrice * parseFloat(item.qty || 0));
+  }, 0);
+
+  const resetReturnUI = () => {
+    setReturnInvoiceSearch("");
+    setReturnSaleData(null);
+    setReturnSelections({});
+    setRefundMethod("Cash");
+    setIsExchangeMode(false);
+    setExchangeCart([]);
+    setExchangeCashReceived("");
+    setExchangePaymentMethod("Cash");
+  };
+
+  // Return/Refund එක Server එකට යැවීම
+  const handleProcessReturn = async () => {
+    if (!returnSaleData) return;
+
+    const itemsToReturn = returnSaleData.items
+      .filter((item) => returnSelections[item._id]?.qty && parseFloat(returnSelections[item._id].qty) > 0)
+      .map((item) => ({
+        itemId: item._id,
+        returnQty: parseFloat(returnSelections[item._id].qty),
+        reason: returnSelections[item._id].reason || "සඳහන් කර නැත"
+      }));
+
+    if (itemsToReturn.length === 0) return showToast("කරුණාකර Return කරන භාණ්ඩ ප්‍රමාණයක් ඇතුලත් කරන්න!", "warning");
+
+    try {
+      const response = await axios.post(`${API_BASE_URL}/products/return`, {
+        saleId: returnSaleData._id,
+        cashierName: user.username,
+        refundMethod,
+        items: itemsToReturn
+      });
+      showToast(response.data.message || "Return එක සාර්ථකයි! ✅");
+      resetReturnUI();
+      fetchProducts();
+      fetchCustomers();
+      if (user.role === "admin") { fetchSalesSummary(); fetchReturnHistory(); }
+    } catch (error) {
+      showToast(error.response?.data?.message || "Return එක අසාර්ථකයි!", "error");
+    }
+  };
+
+  // Exchange එක Server එකට යැවීම (Return + අලුත් Sale එකවර)
+  const handleProcessExchange = async () => {
+    if (!returnSaleData) return;
+    if (exchangeCart.length === 0) return showToast("Exchange කරන අලුත් භාණ්ඩ තෝරන්න!", "warning");
+
+    const returnItems = returnSaleData.items
+      .filter((item) => returnSelections[item._id]?.qty && parseFloat(returnSelections[item._id].qty) > 0)
+      .map((item) => ({
+        itemId: item._id,
+        returnQty: parseFloat(returnSelections[item._id].qty),
+        reason: returnSelections[item._id].reason || "Exchange"
+      }));
+
+    if (returnItems.length === 0) return showToast("කරුණාකර Return කරන පරණ භාණ්ඩ ප්‍රමාණයක් ඇතුලත් කරන්න!", "warning");
+
+    try {
+      const response = await axios.post(`${API_BASE_URL}/products/exchange`, {
+        saleId: returnSaleData._id,
+        cashierName: user.username,
+        refundMethod,
+        returnItems,
+        newItems: exchangeCart.map((item) => ({
+          _id: item.isTemporary ? null : item._id,
+          name: item.name,
+          price: item.price,
+          marketPrice: item.marketPrice,
+          costPrice: item.costPrice,
+          qty: item.qty,
+          discount: item.discount
+        })),
+        extraPaymentMethod: exchangePaymentMethod,
+        extraCashReceived: parseFloat(exchangeCashReceived) || 0
+      });
+
+      const diff = response.data.exchangeDifference;
+      if (diff > 0) {
+        showToast(`Exchange සාර්ථකයි! පාරිභෝගිකයා තව රු.${diff.toFixed(2)} ගෙවිය යුතුයි. ✅`);
+      } else if (diff < 0) {
+        showToast(`Exchange සාර්ථකයි! පාරිභෝගිකයාට රු.${Math.abs(diff).toFixed(2)} ආපසු දෙන්න. ✅`);
+      } else {
+        showToast("Exchange එක සාර්ථකව සම්පූර්ණ කලා! ✅");
+      }
+      resetReturnUI();
+      fetchProducts();
+      fetchCustomers();
+      if (user.role === "admin") { fetchSalesSummary(); fetchReturnHistory(); }
+    } catch (error) {
+      showToast(error.response?.data?.message || "Exchange එක අසාර්ථකයි!", "error");
+    }
+  };
+
   // --- LOGIN LOGIC ---
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -682,7 +904,8 @@ useEffect(() => {
       unit: productForm.unit,
       category: productForm.category,
       minStockLevel: parseFloat(productForm.minStockLevel) || 5,
-      preferredSupplierId: productForm.preferredSupplierId || null
+      preferredSupplierId: productForm.preferredSupplierId || null,
+      expiryDate: productForm.expiryDate || null // 🆕 EXPIRY DATE
     };
     try {
       if (isEditing) {
@@ -694,8 +917,9 @@ useEffect(() => {
         await axios.post(`${API_BASE_URL}/products/add`, submissionData);
         showToast("අලුත් භාණ්ඩය සාර්ථකව ඩේටාබේස් එකට එකතු කලා! ✅");
       }
-      setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "" });
+      setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "", expiryDate: "" });
       fetchProducts();
+      fetchExpiringProducts();
     } catch (error) { showToast("ක්‍රියාවලිය අසාර්ථකයි!", "error"); }
   };
 
@@ -713,7 +937,8 @@ useEffect(() => {
       unit: product.unit || "Kg",
       category: product.category || "Grocery",
       minStockLevel: product.minStockLevel ?? 5,
-      preferredSupplierId: product.preferredSupplierId || ""
+      preferredSupplierId: product.preferredSupplierId || "",
+      expiryDate: product.expiryDate ? new Date(product.expiryDate).toISOString().split("T")[0] : "" // 🆕
     });
   };
 
@@ -764,6 +989,17 @@ useEffect(() => {
     return suggestion > 0 ? suggestion : min;
   };
 
+  // 🆕 EXPIRY HELPERS
+  const getExpiryStatus = (product) => {
+    if (!product.expiryDate) return null;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const expiry = new Date(product.expiryDate); expiry.setHours(0, 0, 0, 0);
+    const diffDays = Math.ceil((expiry - today) / (1000 * 60 * 60 * 24));
+    if (diffDays < 0) return "expired";
+    if (diffDays <= 7) return "expiring";
+    return "ok";
+  };
+
   if (!user) {
     return (
       <div className="flex items-center justify-center h-screen bg-gray-200">
@@ -803,6 +1039,7 @@ useEffect(() => {
           <h1 className="text-xl font-black tracking-wider flex items-center gap-2">SmartStore <span className="bg-blue-600 px-2 py-0.5 rounded text-xs font-bold">PRO-POS v2.0</span></h1>
           <div className="flex space-x-3">
             <button onClick={() => setActiveTab("billing")} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${activeTab === "billing" ? "bg-blue-600 text-white shadow" : "text-gray-300 hover:bg-slate-800"}`}>Billing Window</button>
+            <button onClick={() => { setActiveTab("returns"); resetReturnUI(); }} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${activeTab === "returns" ? "bg-amber-600 text-white shadow" : "text-gray-300 hover:bg-slate-800"}`}>🔄 Returns / Exchange</button>
             {user.role === "admin" && <button onClick={() => setActiveTab("admin")} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${activeTab === "admin" ? "bg-blue-600 text-white shadow" : "text-gray-300 hover:bg-slate-800"}`}>Admin Dashboard</button>}
             
             {/* 🛠Header Logout එකේදී LocalStorage එකත් Clear කරයි */}
@@ -895,7 +1132,7 @@ useEffect(() => {
                       {/* 🛠️ UPDATED: දැන් type කරන කොටම (Live) suggestions පෙන්වයි, Enter → තෝරාගැනීම */}
                       <input
                         type="text"
-                        placeholder="නම හෝ දුරකථන අංකය type කරන්න... (Enter → තෝරන්න)"
+                        placeholder="නම හෝ දුරකථන අංකය type කරන්න..."
                         value={searchPhone}
                         onChange={(e) => setSearchPhone(e.target.value)}
                         onKeyDown={handleCustomerSearchKeyDown}
@@ -1050,7 +1287,7 @@ useEffect(() => {
                             >
                               <option value="Kg">Kilogram (Kg)</option>
                               <option value="G">Gram (G)</option>
-                              <option value="Pcs">Pieces (Pcs)</option>
+                              <option value="Pieces">Pieces</option>
                               <option value="Packet">Packet</option>
                               <option value="Bottle">Bottle</option>
                             </select>
@@ -1111,7 +1348,7 @@ useEffect(() => {
                   </div>
 
                   {/* Search + Product Grid (scrolls independently from the sidebar) */}
-                  <div className="flex-1 flex flex-col gap-3 min-w-0 overflow-y-auto pr-1">
+                  <div className="flex-1 flex flex-col gap-3 min-w-0 overflow-y pr-1">
                     <div className="relative top-0 z-10 bg-gray-100/95 backdrop-blur-sm pb-1 -mt-0.5">
                       <input type="text" placeholder="🔍  භාණ්ඩයේ නම හෝ බාර්කෝඩ් එක ඇතුලත් කරන්න..." value={billingSearch} onChange={(e) => setBillingSearch(e.target.value)} className="w-full p-2.5 pl-9 border rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-medium text-sm" />
                       <span className="absolute left-3 top-3 text-gray-400 text-sm">🔍</span>
@@ -1128,14 +1365,19 @@ useEffect(() => {
                         const discP = parseFloat(product.discount) || 0; 
                         const finalPrice = product.price - (product.price * discP) / 100;
                         const isLowStock = product.stock <= (product.minStockLevel ?? 5);
+                        const expStatus = getExpiryStatus(product);
                         
                         return (
                           <button 
                             key={product._id} 
                             onClick={() => addToCart(product)} 
                             className={`p-3 rounded-xl shadow-sm text-left border relative transition-all active:scale-95 ${
-                              isLowStock 
+                              expStatus === "expired"
+                                ? 'border-gray-400 bg-gray-200 text-gray-500 cursor-not-allowed opacity-70'
+                                : isLowStock 
                                 ? 'border-red-500 bg-red-100 text-red-900 animate-pulse ring-2 ring-red-400 shadow-md shadow-red-200' 
+                                : expStatus === "expiring"
+                                ? 'border-amber-400 bg-amber-50 hover:border-amber-500'
                                 : 'bg-white hover:border-blue-400'
                             }`}
                           >
@@ -1145,12 +1387,252 @@ useEffect(() => {
                             <div className={`text-[10px] font-bold mt-1 ${isLowStock ? 'text-red-700 bg-red-200 px-1 py-0.5 rounded w-fit' : 'text-gray-400'}`}>
                               {isLowStock ? `⚠️ අඩු තොග (Low): ${product.stock}` : `තොග: ${product.stock}`} {product.unit || "Kg"}
                             </div>
+                            {expStatus === "expired" && <div className="text-[10px] font-black mt-1 text-white bg-gray-600 px-1 py-0.5 rounded w-fit">⛔ EXPIRED</div>}
+                            {expStatus === "expiring" && <div className="text-[10px] font-black mt-1 text-amber-800 bg-amber-200 px-1 py-0.5 rounded w-fit">⏳ {new Date(product.expiryDate).toLocaleDateString()}</div>}
                           </button>
                         );
                       })}
                     </div>
                   </div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* 🔄 RETURNS / REFUND / EXCHANGE TAB */}
+          {activeTab === "returns" && (
+            <div className="flex w-full h-full bg-slate-50 overflow-hidden">
+              <div className="flex-1 p-4 overflow-y-auto space-y-4 max-w-5xl mx-auto w-full">
+
+                {/* Invoice Search */}
+                <div className="bg-white p-4 rounded-xl border shadow-xs">
+                  <h2 className="text-sm font-black uppercase text-slate-800 mb-3">🔄 Return / Refund / Exchange</h2>
+                  <form onSubmit={handleSearchInvoiceForReturn} className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="🧾 බිල් අංකය ඇතුලත් කරන්න..."
+                      value={returnInvoiceSearch}
+                      onChange={(e) => setReturnInvoiceSearch(e.target.value)}
+                      className="flex-1 p-2.5 border rounded-lg text-sm bg-gray-50 focus:bg-white font-mono"
+                    />
+                    <button type="submit" disabled={returnLoading} className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-lg text-sm font-bold disabled:opacity-50">
+                      {returnLoading ? "සොයමින්..." : "සොයන්න 🔍"}
+                    </button>
+                    {returnSaleData && (
+                      <button type="button" onClick={resetReturnUI} className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold">Clear ✕</button>
+                    )}
+                  </form>
+                  <p className="text-[10px] text-gray-400 mt-2">💡 Invoice Number එක මෙතන ඇතුලත් කරන්න.</p>
+                </div>
+
+                {returnSaleData && (
+                  <>
+                    {/* Sale Info Card */}
+                    <div className="bg-white p-4 rounded-xl border shadow-xs flex flex-wrap justify-between items-center gap-3">
+                      <div>
+                        <p className="text-[10px] text-gray-400 font-bold">බිල්පත් අංකය</p>
+                        <p className="font-mono text-xs font-bold text-slate-800">{returnSaleData.invoiceNo || returnSaleData._id}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-gray-400 font-bold">දිනය</p>
+                        <p className="text-xs font-bold text-slate-800">{new Date(returnSaleData.createdAt).toLocaleString()}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-gray-400 font-bold">කැෂියර්</p>
+                        <p className="text-xs font-bold text-slate-800">{returnSaleData.cashier}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-gray-400 font-bold">ගෙවීම් ක්‍රමය</p>
+                        <p className="text-xs font-bold text-slate-800">{returnSaleData.paymentMethod}{returnSaleData.customerId ? ` (${returnSaleData.customerId.name})` : ""}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-gray-400 font-bold">මුළු එකතුව</p>
+                        <p className="text-sm font-black text-blue-600">රු. {returnSaleData.totalAmount.toFixed(2)}</p>
+                      </div>
+                      <div>
+                        <span className={`px-2 py-1 rounded-full text-[10px] font-black ${
+                          returnSaleData.status === "Voided" ? "bg-gray-200 text-gray-600" :
+                          returnSaleData.status === "Returned" ? "bg-red-100 text-red-600" :
+                          returnSaleData.status === "PartiallyReturned" ? "bg-amber-100 text-amber-700" :
+                          "bg-emerald-100 text-emerald-700"
+                        }`}>{returnSaleData.status || "Completed"}</span>
+                      </div>
+                    </div>
+
+                    {returnSaleData.status === "Voided" ? (
+                      <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl text-sm font-bold text-center">
+                        🚫 මෙම බිල්පත දැනටමත් අවලංගු (Voided) කර ඇති නිසා Return/Exchange කළ නොහැක.
+                      </div>
+                    ) : (
+                      <>
+                        {/* Items table with return qty inputs */}
+                        <div className="bg-white rounded-xl border shadow-xs overflow-hidden">
+                          <div className="p-3 border-b bg-gray-50">
+                            <h3 className="text-xs font-black uppercase text-slate-800">📦 Return කරන භාණ්ඩ තෝරන්න</h3>
+                          </div>
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                              <tr className="bg-slate-100 text-slate-700 font-bold border-b">
+                                <th className="p-2.5">භාණ්ඩය</th>
+                                <th className="p-2.5 text-center">මිලදී ගත් ප්‍රමාණය</th>
+                                <th className="p-2.5 text-center">දැනටමත් Return</th>
+                                <th className="p-2.5 text-center">Return ප්‍රමාණය</th>
+                                <th className="p-2.5">හේතුව (Optional)</th>
+                                <th className="p-2.5 text-right">Refund වන මුදල</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                              {returnSaleData.items.map((item) => {
+                                const available = item.qty - (item.returnedQty || 0);
+                                const sel = returnSelections[item._id] || {};
+                                const selQty = Math.min(parseFloat(sel.qty) || 0, available);
+                                return (
+                                  <tr key={item._id} className={available <= 0 ? "opacity-40" : ""}>
+                                    <td className="p-2.5 font-bold text-slate-900">{item.name}</td>
+                                    <td className="p-2.5 text-center">{item.qty}</td>
+                                    <td className="p-2.5 text-center text-gray-400">{item.returnedQty || 0}</td>
+                                    <td className="p-2.5 text-center">
+                                      <input
+                                        type="number" min="0" max={available} step="0.001"
+                                        disabled={available <= 0}
+                                        placeholder="0"
+                                        value={sel.qty || ""}
+                                        onChange={(e) => handleReturnSelectionChange(item._id, "qty", e.target.value)}
+                                        className="w-20 p-1.5 border rounded text-center font-bold bg-amber-50/50"
+                                      />
+                                    </td>
+                                    <td className="p-2.5">
+                                      <input
+                                        type="text" placeholder="e.g. Damaged / Wrong item"
+                                        value={sel.reason || ""}
+                                        onChange={(e) => handleReturnSelectionChange(item._id, "reason", e.target.value)}
+                                        className="w-full p-1.5 border rounded bg-gray-50 text-[11px]"
+                                      />
+                                    </td>
+                                    <td className="p-2.5 text-right font-black text-red-600">රු. {(selQty * item.price).toFixed(2)}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        {/* Mode + Refund Method */}
+                        <div className="bg-white p-4 rounded-xl border shadow-xs flex flex-wrap gap-4 items-end">
+                          <div>
+                            <p className="text-[11px] font-bold text-gray-600 mb-1">ක්‍රියාව තෝරන්න:</p>
+                            <div className="flex bg-gray-100 rounded-lg p-1">
+                              <button onClick={() => setIsExchangeMode(false)} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${!isExchangeMode ? "bg-white shadow text-blue-600" : "text-gray-500"}`}>↩️ Return Only</button>
+                              <button onClick={() => setIsExchangeMode(true)} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${isExchangeMode ? "bg-white shadow text-amber-600" : "text-gray-500"}`}>🔁 Exchange</button>
+                            </div>
+                          </div>
+                          <div>
+                            <p className="text-[11px] font-bold text-gray-600 mb-1">Refund ක්‍රමය:</p>
+                            <select value={refundMethod} onChange={(e) => setRefundMethod(e.target.value)} className="p-2 border rounded-lg text-xs font-bold bg-gray-50">
+                              <option value="Cash">💵 Cash (අතට ආපසු)</option>
+                              <option value="Card">💳 Card ආපසු</option>
+                              <option value="StoreCredit">🎟️ Store Credit (ගිණුමට)</option>
+                              {returnSaleData.paymentMethod === "Credit" && <option value="CreditAdjust">📕 ණය පොතෙන් අඩු කිරීම</option>}
+                            </select>
+                          </div>
+                          <div className="ml-auto text-right">
+                            <p className="text-[11px] font-bold text-gray-500">මුළු Refund මුදල</p>
+                            <p className="text-xl font-black text-red-600">රු. {calculateReturnTotal().toFixed(2)}</p>
+                          </div>
+                        </div>
+
+                        {/* EXCHANGE: pick replacement items */}
+                        {isExchangeMode && (
+                          <div className="bg-white p-4 rounded-xl border shadow-xs space-y-3">
+                            <h3 className="text-xs font-black uppercase text-slate-800">🆕 අලුත් භාණ්ඩ තෝරන්න (Exchange)</h3>
+                            <input
+                              type="text" placeholder="🔍 භාණ්ඩයේ නම හෝ බාර්කෝඩ් සොයන්න..."
+                              value={exchangeProductSearch} onChange={(e) => setExchangeProductSearch(e.target.value)}
+                              className="w-full p-2 border rounded-lg text-sm bg-gray-50"
+                            />
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 max-h-48 overflow-y-auto">
+                              {products.filter(p =>
+                                p.name.toLowerCase().includes(exchangeProductSearch.toLowerCase()) ||
+                                (p.barcode && p.barcode.includes(exchangeProductSearch))
+                              ).slice(0, 20).map((p) => (
+                                <button key={p._id} onClick={() => addToExchangeCart(p)} className="p-2 rounded-lg border bg-slate-50 hover:border-amber-400 text-left">
+                                  <div className="text-[11px] font-bold text-slate-800 truncate">{p.name}</div>
+                                  <div className="text-xs font-black text-blue-600">රු. {p.price.toFixed(2)}</div>
+                                </button>
+                              ))}
+                            </div>
+
+                            {exchangeCart.length > 0 && (
+                              <div className="border-t pt-2 space-y-1.5">
+                                {exchangeCart.map((item) => {
+                                  const discP = parseFloat(item.discountPercent || item.discount) || 0;
+                                  const finalP = item.price - (item.price * discP) / 100;
+                                  return (
+                                    <div key={item._id} className="flex items-center justify-between bg-amber-50 p-2 rounded-lg text-xs">
+                                      <span className="font-bold flex-1">{item.name}</span>
+                                      <input
+                                        type="number" step="0.001" value={item.qty}
+                                        onChange={(e) => setExchangeCart(exchangeCart.map(c => c._id === item._id ? { ...c, qty: e.target.value } : c))}
+                                        className="w-16 p-1 border rounded text-center font-bold mx-2"
+                                      />
+                                      <span className="font-black text-slate-800 w-20 text-right">රු. {(finalP * parseFloat(item.qty || 0)).toFixed(2)}</span>
+                                      <button onClick={() => removeFromExchangeCart(item._id)} className="text-red-500 font-bold px-2">✕</button>
+                                    </div>
+                                  );
+                                })}
+                                <div className="flex justify-between font-black text-sm pt-1">
+                                  <span>අලුත් භාණ්ඩ එකතුව:</span>
+                                  <span className="text-blue-600">රු. {calculateExchangeCartTotal().toFixed(2)}</span>
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="flex flex-wrap gap-3 items-end border-t pt-3">
+                              <div>
+                                <p className="text-[11px] font-bold text-gray-600 mb-1">වෙනස (Difference) ගෙවීමට ක්‍රමය:</p>
+                                <select value={exchangePaymentMethod} onChange={(e) => setExchangePaymentMethod(e.target.value)} className="p-2 border rounded-lg text-xs font-bold bg-gray-50">
+                                  <option value="Cash">💵 Cash</option>
+                                  <option value="Card">💳 Card</option>
+                                  {returnSaleData.customerId && <option value="Credit">📕 Credit</option>}
+                                </select>
+                              </div>
+                              {exchangePaymentMethod === "Cash" && (
+                                <div>
+                                  <p className="text-[11px] font-bold text-gray-600 mb-1">ලැබුණු මුදල (Optional):</p>
+                                  <input type="number" value={exchangeCashReceived} onChange={(e) => setExchangeCashReceived(e.target.value)} className="p-2 border rounded-lg text-xs w-32" placeholder="0.00" />
+                                </div>
+                              )}
+                              <div className="ml-auto text-right">
+                                <p className="text-[11px] font-bold text-gray-500">වෙනස (New - Refund)</p>
+                                {(() => {
+                                  const diff = calculateExchangeCartTotal() - calculateReturnTotal();
+                                  return (
+                                    <p className={`text-xl font-black ${diff > 0 ? "text-red-600" : diff < 0 ? "text-emerald-600" : "text-slate-800"}`}>
+                                      {diff > 0 ? `තව ගෙවන්න: රු. ${diff.toFixed(2)}` : diff < 0 ? `ආපසු දෙන්න: රු. ${Math.abs(diff).toFixed(2)}` : "වෙනසක් නැත"}
+                                    </p>
+                                  );
+                                })()}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Submit */}
+                        <div className="bg-slate-900 text-white p-4 rounded-xl flex justify-between items-center shadow-lg">
+                          <p className="text-xs text-gray-300">
+                            {isExchangeMode ? "Exchange එක සම්පූර්ණ කිරීමට Return items සහ අලුත් items දෙකම තෝරන්න." : "Return/Refund එක සම්පූර්ණ කිරීමට Return කරන ප්‍රමාණය ඇතුලත් කරන්න."}
+                          </p>
+                          <button
+                            onClick={isExchangeMode ? handleProcessExchange : handleProcessReturn}
+                            className={`px-6 py-2.5 rounded-lg font-black text-sm shadow-md transition-all ${isExchangeMode ? "bg-amber-500 hover:bg-amber-600" : "bg-red-600 hover:bg-red-700"}`}
+                          >
+                            {isExchangeMode ? "🔁 Exchange එක සම්පූර්ණ කරන්න" : "↩️ Return එක සම්පූර්ණ කරන්න"}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -1164,11 +1646,18 @@ useEffect(() => {
                 <button onClick={() => setAdminSubTab("customers")} className={`p-3 text-left font-bold ${adminSubTab === "customers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👥 පාරිභෝගික පොත</button>
                 <button onClick={() => setAdminSubTab("suppliers")} className={`p-3 text-left font-bold ${adminSubTab === "suppliers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚚 සැපයුම්කරුවන්</button>
                 <button onClick={() => setAdminSubTab("reorder")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "reorder" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
-                  <span>🔔 Reorder Alerts</span>
+                  <span>🔔 Low-Stock Alerts</span>
                   {lowStockProducts.length > 0 && (
                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black ${adminSubTab === "reorder" ? "bg-white/20" : "bg-red-500 text-white animate-pulse"}`}>{lowStockProducts.length}</span>
                   )}
                 </button>
+                <button onClick={() => setAdminSubTab("expiry")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "expiry" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
+                  <span>⏳ Expiry Alerts</span>
+                  {expiringProducts.length > 0 && (
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black ${adminSubTab === "expiry" ? "bg-white/20" : "bg-red-500 text-white animate-pulse"}`}>{expiringProducts.length}</span>
+                  )}
+                </button>
+                <button onClick={() => setAdminSubTab("returns")} className={`p-3 text-left font-bold ${adminSubTab === "returns" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🔄 Return/Exchange ඉතිහාසය</button>
                 <button onClick={() => setAdminSubTab("sales")} className={`p-3 text-left font-bold ${adminSubTab === "sales" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📊 විකුණුම් වාර්තා</button>
               </div>
 
@@ -1209,7 +1698,7 @@ useEffect(() => {
                           <select value={productForm.unit} onChange={(e) => setProductForm({ ...productForm, unit: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 text-gray-700">
                             <option value="Kg">Kilogram (Kg)</option>
                             <option value="G">Gram (G)</option>
-                            <option value="Pcs">Pieces (Pcs)</option>
+                            <option value="Pieces">Pieces</option>
                             <option value="Packet">Packet</option>
                             <option value="Bottle">Bottle</option>
                           </select>
@@ -1239,8 +1728,12 @@ useEffect(() => {
                             ))}
                           </select>
                         </div>
+                        <div>
+                          <label className="text-[11px] font-bold text-gray-600 block mb-1">⏳ කල් ඉකුත් වන දිනය (Expiry Date - Optional):</label>
+                          <input type="date" value={productForm.expiryDate} onChange={(e) => setProductForm({ ...productForm, expiryDate: e.target.value })} className="w-full p-2 border rounded text-xs bg-orange-50/50 font-bold" />
+                        </div>
                         <div className="col-span-2 md:col-span-4 flex justify-end gap-2 pt-2">
-                          {isEditing && <button type="button" onClick={() => { setIsEditing(false); setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "" }); }} className="bg-gray-500 text-white px-4 py-2 rounded text-xs font-bold">Cancel</button>}
+                          {isEditing && <button type="button" onClick={() => { setIsEditing(false); setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "", expiryDate: "" }); }} className="bg-gray-500 text-white px-4 py-2 rounded text-xs font-bold">Cancel</button>}
                           <button type="submit" className="bg-blue-600 text-white px-6 py-2 rounded text-xs font-bold shadow-md">{isEditing ? "යාවත්කාලීන කරන්න" : "ඩේටාබේස් එකට එකතු කරන්න"}</button>
                         </div>
                       </form>
@@ -1263,12 +1756,15 @@ useEffect(() => {
                             <th className="p-3 text-right">ගැනුම් මිල</th>
                             <th className="p-3 text-center">වත්මන් තොගය</th>
                             <th className="p-3 text-center">වට්ටම්</th>
+                            <th className="p-3 text-center">⏳ Expiry</th>
                             <th className="p-3 text-center">ක්‍රියාවන්</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100 font-medium">
-                          {filteredAdminProducts.map((p) => (
-                            <tr key={p._id} className="hover:bg-slate-50/80">
+                          {filteredAdminProducts.map((p) => {
+                            const expStatus = getExpiryStatus(p);
+                            return (
+                            <tr key={p._id} className={`hover:bg-slate-50/80 ${expStatus === "expired" ? "bg-red-50/60" : expStatus === "expiring" ? "bg-amber-50/60" : ""}`}>
                               <td className="p-3 font-bold text-slate-900">{p.name}</td>
                               <td className="p-3">
                                 <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 whitespace-nowrap">
@@ -1282,12 +1778,23 @@ useEffect(() => {
                               <td className="p-3 text-right text-emerald-700">රු. {p.costPrice?.toFixed(2) || "0.00"}</td>
                               <td className="p-3 text-center font-black"><span className={`px-2 py-0.5 rounded-sm ${p.stock > (p.minStockLevel ?? 5) ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600'}`}>{p.stock} {p.unit || 'Kg'}</span></td>
                               <td className="p-3 text-center text-red-500 font-bold">{p.discount || 0}% OFF</td>
+                              <td className="p-3 text-center">
+                                {p.expiryDate ? (
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-black whitespace-nowrap ${
+                                    expStatus === "expired" ? "bg-red-600 text-white" :
+                                    expStatus === "expiring" ? "bg-amber-400 text-amber-950" :
+                                    "bg-gray-100 text-gray-500"
+                                  }`}>
+                                    {expStatus === "expired" ? "⛔ Expired" : expStatus === "expiring" ? "⚠️ " : ""}{new Date(p.expiryDate).toLocaleDateString()}
+                                  </span>
+                                ) : <span className="text-gray-300 text-[10px]">-</span>}
+                              </td>
                               <td className="p-3 text-center space-x-1.5">
                                 <button onClick={() => handleEditClick(p)} className="bg-amber-500 hover:bg-amber-600 text-white px-2 py-1 rounded text-[10px] font-bold">Edit</button>
                                 <button onClick={() => handleDeleteClick(p._id)} className="bg-red-600 hover:bg-red-700 text-white px-2 py-1 rounded text-[10px] font-bold">Delete</button>
                               </td>
                             </tr>
-                          ))}
+                          );})}
                         </tbody>
                       </table>
                     </div>
@@ -1298,7 +1805,7 @@ useEffect(() => {
                 {adminSubTab === "reorder" && (
                   <div className="space-y-6">
                     <div className="bg-white p-5 rounded-xl border shadow-xs">
-                      <h3 className="text-sm font-black uppercase text-slate-800 mb-1">🔔 Reorder Alerts</h3>
+                      <h3 className="text-sm font-black uppercase text-slate-800 mb-1">🔔 Low-Stock Alerts</h3>
                       <p className="text-xs text-gray-500">අවම තොග මට්ටමට වඩා අඩුවෙලා තියෙන භාණ්ඩ, Supplier අනුව Group කර පෙන්වයි</p>
                     </div>
 
@@ -1342,6 +1849,100 @@ useEffect(() => {
                           </div>
                         );
                       })
+                    )}
+                  </div>
+                )}
+
+                {/* 🆕 EXPIRY ALERTS Sub-tab */}
+                {adminSubTab === "expiry" && (
+                  <div className="space-y-6">
+                    <div className="bg-white p-5 rounded-xl border shadow-xs">
+                      <h3 className="text-sm font-black uppercase text-slate-800 mb-1">⏳ Expiry Alerts</h3>
+                      <p className="text-xs text-gray-500">ඉදිරි දින 7ක් ඇතුලත Expire වන සහ දැනටමත් Expire වුනු භාණ්ඩ ලැයිස්තුව</p>
+                    </div>
+
+                    {expiringProducts.length === 0 ? (
+                      <div className="bg-white p-10 rounded-xl border shadow-xs flex flex-col items-center justify-center text-center">
+                        <span className="text-4xl mb-2">✅</span>
+                        <p className="text-sm font-bold text-slate-700">ළඟදී Expire වන භාණ්ඩයක් නැත!</p>
+                      </div>
+                    ) : (
+                      <div className="bg-white rounded-xl border shadow-xs overflow-hidden">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-slate-100 text-slate-700 font-bold border-b">
+                              <th className="p-3">භාණ්ඩයේ නම</th>
+                              <th className="p-3 text-center">වත්මන් තොගය</th>
+                              <th className="p-3 text-center">Expiry Date</th>
+                              <th className="p-3 text-center">තත්ත්වය</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100 font-medium">
+                            {expiringProducts.map((p) => (
+                              <tr key={p._id} className={p.expiryStatus === "expired" ? "bg-red-50/60" : "bg-amber-50/40"}>
+                                <td className="p-3 font-bold text-slate-900">{p.name}</td>
+                                <td className="p-3 text-center">{p.stock} {p.unit || "Kg"}</td>
+                                <td className="p-3 text-center font-bold">{new Date(p.expiryDate).toLocaleDateString()}</td>
+                                <td className="p-3 text-center">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${p.expiryStatus === "expired" ? "bg-red-600 text-white" : "bg-amber-400 text-amber-950"}`}>
+                                    {p.expiryStatus === "expired" ? "⛔ කල් ඉකුත් වී ඇත" : "⚠️ ළඟදීම Expire වේ"}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 🆕 RETURN / EXCHANGE HISTORY Sub-tab */}
+                {adminSubTab === "returns" && (
+                  <div className="space-y-6">
+                    <div className="bg-white p-5 rounded-xl border shadow-xs">
+                      <h3 className="text-sm font-black uppercase text-slate-800 mb-1">🔄 Return / Exchange History</h3>
+                      <p className="text-xs text-gray-500">සිදු කරන ලද සියලුම Return, Refund සහ Exchange transactions</p>
+                    </div>
+
+                    {returnHistory.length === 0 ? (
+                      <div className="bg-white p-10 rounded-xl border shadow-xs flex flex-col items-center justify-center text-center">
+                        <span className="text-4xl mb-2">📭</span>
+                        <p className="text-sm font-bold text-slate-700">තවම Return/Exchange සිදුවී නැත</p>
+                      </div>
+                    ) : (
+                      <div className="bg-white rounded-xl border shadow-xs overflow-hidden">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-slate-100 text-slate-700 font-bold border-b">
+                              <th className="p-3">දිනය</th>
+                              <th className="p-3">මුල් බිල් අංකය</th>
+                              <th className="p-3">වර්ගය</th>
+                              <th className="p-3">කැෂියර්</th>
+                              <th className="p-3">භාණ්ඩ</th>
+                              <th className="p-3">Refund ක්‍රමය</th>
+                              <th className="p-3 text-right">Refund මුදල</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100 font-medium">
+                            {returnHistory.map((r) => (
+                              <tr key={r._id} className="hover:bg-slate-50/80">
+                                <td className="p-3 text-gray-500">{new Date(r.createdAt).toLocaleString()}</td>
+                                <td className="p-3 font-mono font-bold text-slate-700">{r.invoiceNo || `#${r.saleId.toString().slice(-8).toUpperCase()}`}</td>
+                                <td className="p-3">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${r.type === "Exchange" ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-600"}`}>
+                                    {r.type === "Exchange" ? "🔁 Exchange" : "↩️ Return"}
+                                  </span>
+                                </td>
+                                <td className="p-3 font-bold">{r.cashier}</td>
+                                <td className="p-3 text-gray-600">{r.items.map(i => `${i.name} (${i.qty})`).join(", ")}</td>
+                                <td className="p-3">{r.refundMethod}</td>
+                                <td className="p-3 text-right font-black text-red-600">රු. {r.totalRefundAmount.toFixed(2)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     )}
                   </div>
                 )}
@@ -1703,6 +2304,7 @@ useEffect(() => {
                       <table className="w-full text-left border-collapse text-xs">
                         <thead>
                           <tr className="bg-slate-100 text-slate-700 font-bold border-b">
+                            <th className="p-3">Invoice No</th>
                             <th className="p-3">දිනය සහ වේලාව</th>
                             <th className="p-3">කැෂියර්</th>
                             <th className="p-3">ගෙවීම් ක්‍රමය</th>
@@ -1714,12 +2316,14 @@ useEffect(() => {
                         <tbody className="divide-y divide-gray-100 font-medium">
                           {salesSummary.sales?.map((sale) => (
                             <tr key={sale._id} className="hover:bg-slate-50/80">
+                              <td className="p-3 font-mono font-bold text-slate-700">{sale.invoiceNo || `#${sale._id.slice(-8).toUpperCase()}`}</td>
                               <td className="p-3 text-gray-500">{new Date(sale.createdAt).toLocaleString()}</td>
                               <td className="p-3 font-bold">{sale.cashier || "Cashier"}</td>
                               <td className="p-3"><span className={`px-2 py-0.5 rounded-sm font-bold text-[10px] ${sale.paymentMethod === 'Cash' ? 'bg-emerald-100 text-emerald-700' : sale.paymentMethod === 'Credit' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`}>{sale.paymentMethod}</span></td>
                               <td className="p-3 text-right font-black text-slate-900">රු. {sale.totalAmount.toFixed(2)}</td>
                               <td className="p-3 text-right text-emerald-600">රු. {sale.totalProfit.toFixed(2)}</td>
                               <td className="p-3 text-center">
+                                <button onClick={() => { const ref = sale.invoiceNo || sale._id; setReturnInvoiceSearch(ref); setActiveTab("returns"); handleSearchInvoiceForReturn(null, ref); }} className="bg-amber-100 hover:bg-amber-600 text-amber-700 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all mr-1">🔄 Return</button>
                                 <button onClick={() => handleVoidSale(sale._id)} className="bg-red-100 hover:bg-red-600 text-red-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all">VOID ✕</button>
                               </td>
                             </tr>
@@ -1738,45 +2342,69 @@ useEffect(() => {
       {/* 🖨️ INVOICE PRINT LAYOUT */}
       <div className="hidden print:block p-4 w-[80mm] text-black font-mono text-xs bg-white">
         <div className="text-center font-bold text-sm">--- SmartStore ---</div>
-        <div className="text-center text-[9px] text-gray-600">No. 123/A, Kandy Road, Kadawatha</div>
-        <hr className="border-dashed border-black my-1" />
-        <div className="text-[10px] space-y-0.5">
-          <div><b>බිල් අංකය:</b> IN-{Math.floor(1000 + Math.random() * 9000)}</div>
-          <div><b>අයකැමි:</b> {user.username}</div>
-          <div><b>දිනය:</b> {new Date().toLocaleDateString()} {new Date().toLocaleTimeString()}</div>
+        <div className="text-center text-[9px] text-gray-700">No. 123/A, Kandy Road, Kadawatha</div>
+        <div className="text-center text-[9px] text-gray-700">071-2683025 / 078-1533835</div>
+        {/* <hr className="border-dashed border-black my-1" /> */}
+        {/* <div className="text-center font-black text-[13px] tracking-wider border border-red-600 rounded px-2 py-1 my-1 inline-block mx-auto w-full">
+          {lastInvoiceNo || "N/A"}
+        </div> */}
+        <div className="text-[9px] pt-3 space-y-0.5">
+          {lastSaleIsOffline && (
+            <div className="text-red-600 font-bold">
+              ⚠️ Offline බිල - Internet ලැබුනාට පස්සේ Sync වේ. Sync වෙනකම් Return/Exchange කළ නොහැක.
+            </div>
+          )}
+
+          <div className="grid grid-cols-[65px_1fr]">
+            <span className="font-bold">බිල්ප​ත් අංකය</span>
+            <span>: {lastInvoiceNo || "N/A"}</span>
+          </div>
+
+          <div className="grid grid-cols-[65px_1fr]">
+            <span className="font-bold">අයකැමි</span>
+            <span>: {user.username}</span>
+          </div>
+
+          <div className="grid grid-cols-[65px_1fr]">
+            <span className="font-bold">දිනය</span>
+            <span>
+              : {new Date().toLocaleDateString()} {new Date().toLocaleTimeString()}
+            </span>
+          </div>
         </div>
-        <hr className="border-dashed border-black my-1" />
+        <hr className="border-dotted border-black my-2" />
         
         {/* Table Headers */}
-        <div className="grid grid-cols-12 font-bold text-[9px] border-b pb-0.5 mb-1 text-center bg-gray-100 p-0.5">
-          <div className="col-span-4 text-left">ප්‍රමාණය</div>
+        <div className="grid grid-cols-12 font-bold text-[10px] border-b border-dotted pb-0.5 mb-1 text-center bg-gray-100 p-0.5">
+          <div className="col-span-4">ප්‍රමාණය</div>
           <div className="col-span-3">සා.මිල</div>
           <div className="col-span-2">අපේ මිල</div>
           <div className="col-span-3 text-right">එකතුව</div>
         </div>
 
         {/* Table Rows */}
-        <div className="space-y-1.5 border-b pb-1">
-          {cart.map((item) => {
+        <div className="space-y-1.5">
+          {cart.map((item, index) => {
             const discPercent = parseFloat(item.discountPercent || item.discount) || 0;
             const originalPrice = parseFloat(item.price);
             const discountAmount = (originalPrice * discPercent) / 100;
             const finalPrice = originalPrice - discountAmount;
             const qtyParsed = parseFloat(item.qty) || 0;
-            const unitSymbol = item.unit === "Kg" ? "kg" : "Pcs";
+            const unitSymbols = { Kg: "kg", G: "g", Pieces: "Pieces", Packet: "Packet", Bottle: "Bottle" };
+            const unitSymbol = unitSymbols[item.unit] || "";
 
             return (
-              <div key={item._id} className="text-[10px] border-b border-dotted pb-1">
-                <div className="font-bold text-[11px]">{item.name}</div>
+              <div key={item._id, index} className="text-[10px] border-b border-dotted pb-1">
+                <div className="font-bold text-[11px]">{index + 1}. {item.name}</div>
                 <div className="grid grid-cols-12 text-slate-900 mt-0.5">
-                  <div className="col-span-4 text-left font-semibold">{qtyParsed} {unitSymbol}</div>
+                  <div className="col-span-4 text-center font-semibold">{qtyParsed} {unitSymbol}</div>
                   <div className="col-span-3 text-center">{Number(item.marketPrice || item.price).toFixed(2)}</div>
                   <div className="col-span-2 text-center">{originalPrice.toFixed(2)}</div>
                   <div className="col-span-3 text-right font-black">{(finalPrice * qtyParsed).toFixed(2)}</div>
                 </div>
                 {discPercent > 0 && (
                   <div className="text-[9px] text-red-600 font-bold italic pl-1">
-                    ↳ ({discPercent}% Discount)
+                    ↳ ({discPercent}% විශේෂ වට්ට​ම්)
                   </div>
                 )}
               </div>
@@ -1785,32 +2413,44 @@ useEffect(() => {
         </div>
 
         {/* Financial Summary */}
-        <div className="space-y-1 mt-2 text-[11px] border-t pt-1">
+        <div className="space-y-1 mt-2 text-[11px] pt-2">
           <div className="flex justify-between font-bold text-sm">
-            <span>මුළු එකතුව (Total Amount)</span>
-            <span>රු. {calculateTotal().toFixed(2)}</span>
+            <span>මුළු එකතුව</span>
+            <span className="border-b-4 border-double border-t pt-1 pb-1">රු. {calculateTotal().toFixed(2)}</span>
           </div>
+         
           
-          <div className="flex justify-between">
+          {paymentMethod === "Credit" && (
+            <div className="text-gray-700 flex justify-between border-b border-dotted pb-1 pt-1">
             <span>ගෙවූ මුදල (Amount Paid)</span>
             <span className="font-bold">
               රු. {(paymentMethod === "Credit" ? (amountPaid === "" ? 0 : parseFloat(amountPaid)) : calculateTotal()).toFixed(2)}
             </span>
           </div>
+          )}
+          
           
           {paymentMethod === "Credit" && (
-            <div className="flex justify-between text-red-600 font-bold border-t border-dashed pt-0.5">
-              <span>ණය පොතට (Credit Due)</span>
-              <span>රු. {(calculateTotal() - (amountPaid === "" ? 0 : parseFloat(amountPaid))).toFixed(2)}</span>
+            <div className="flex justify-between  font-bold border-b border-dotted pt-1 pb-1">
+              <span className="text-red-600">ගෙවීමට ඇති මුද​ල (Credit Amount)</span>
+              <span className="text-red-600">රු. {(calculateTotal() - (amountPaid === "" ? 0 : parseFloat(amountPaid))).toFixed(2)}</span>
             </div>
           )}
 
           {paymentMethod === "Cash" && (
             <>
-              <div className="flex justify-between border-t pt-0.5 text-gray-600"><span>ලැබුණු මුදල:</span><span>රු. {parseFloat(cashReceived || 0).toFixed(2)}</span></div>
-              <div className="flex justify-between font-bold text-slate-900"><span>ඉතිරි මුදල (Balance):</span><span>රු. {balanceAmount.toFixed(2)}</span></div>
+              <div className="flex justify-between border-b border-dotted pb-1 pt-1 font-bold text-gray-700"><span>ලැබුණු මුදල (Cash):</span><span>රු. {parseFloat(cashReceived || 0).toFixed(2)}</span></div>
+              <div className="flex justify-between border-b border-dotted pb-1 font-bold text-slate-900"><span>ඉතිරි මුදල (Balance):</span><span>රු. {balanceAmount.toFixed(2)}</span></div>
             </>
           )}
+
+          <div className="text-gray-700 text-[9px] flex justify-between border-b border-dotted pb-1 pt-1">
+            <span>මුළු භාණ්ඩ ගණ​න (No. of Items)</span>
+            <span>
+              {cart.length}
+            </span>
+          </div>
+
         </div>
 
         {/* TOTAL SAVINGS BOX */}
@@ -1820,7 +2460,8 @@ useEffect(() => {
           const priceP = parseFloat(item.price);
           const totalSavedPerItem = (marketP - priceP) + ((priceP * discP) / 100);
           return sum + (totalSavedPerItem * parseFloat(item.qty || 0));
-        }, 0) > 0 && (
+        }, 
+        0) > 0 && (
           <div className="mt-3 p-1.5 border border-black border-dashed text-center bg-slate-50">
             <div className="font-bold text-[10px]">ඔබට ලැබුණු මුළු ලාභය</div>
             <div className="font-black text-xs mt-0.5">
@@ -1833,7 +2474,8 @@ useEffect(() => {
               }, 0).toFixed(2)}
             </div>
           </div>
-        )}
+        )
+        }
 
         <hr className="border-dashed border-black my-2" />
         <div className="text-center font-bold text-[9px] uppercase tracking-wider">Thank you! Come Again.</div>
