@@ -124,11 +124,11 @@ function App() {
 
   // Helper to trigger custom beautiful toast notifications
   const showToast = (message, type = "success") => {
-    const id = Date.now();
+    const id = Date.now() + Math.random();
     setToasts((prev) => [...prev, { id, message, type }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
-    }, 4000);
+    }, 500);
   };
 
   useEffect(() => {
@@ -953,12 +953,28 @@ useEffect(() => {
     }
   };
 
-  const filteredBillingProducts = products.filter(p => {
-    const matchesSearch = p.name.toLowerCase().includes(billingSearch.toLowerCase()) || 
-      (p.barcode && p.barcode.includes(billingSearch));
-    const matchesCategory = billingCategoryFilter === "All" || (p.category || "Grocery") === billingCategoryFilter;
-    return matchesSearch && matchesCategory;
-  });
+ const filteredBillingProducts = products
+    .filter(p => {
+      const matchesSearch = p.name.toLowerCase().includes(billingSearch.toLowerCase()) || 
+        (p.barcode && p.barcode.includes(billingSearch));
+      const matchesCategory = billingCategoryFilter === "All" || (p.category || "Grocery") === billingCategoryFilter;
+      return matchesSearch && matchesCategory;
+    })
+    .sort((a, b) => {
+      const search = billingSearch.toLowerCase();
+      const aName = a.name.toLowerCase();
+      const bName = b.name.toLowerCase();
+
+      const aStarts = aName.startsWith(search);
+      const bStarts = bName.startsWith(search);
+
+      // search text එකෙන්ම පටන් ගන්න ඒවා මුලට
+      if (aStarts && !bStarts) return -1;
+      if (!aStarts && bStarts) return 1;
+
+      // දෙකම starts වුණොත් හෝ දෙකම නොවුණොත්, alphabetical order එකට
+      return aName.localeCompare(bName);
+    });
 
   // 🛠️ NEW: Category tab එක් එකකට කීයක් products තියෙනවද කියලා ගණන් කිරීම (badge count සඳහා)
   const billingCategoryCounts = products.reduce((counts, p) => {
@@ -1351,7 +1367,7 @@ useEffect(() => {
 
                   {/* Search + Product Grid (scrolls independently from the sidebar) */}
                   <div className="flex-1 flex flex-col gap-3 min-w-0 overflow-y pr-1">
-                    <div className="relative top-0 z-10 bg-gray-100/95 backdrop-blur-sm pb-1 -mt-0.5">
+                    <div className="sticky top-0 z-10 bg-gray-100/95 backdrop-blur-sm pb-1 -mt-0.5">
                       <input type="text" placeholder="🔍  භාණ්ඩයේ නම හෝ බාර්කෝඩ් එක ඇතුලත් කරන්න..." value={billingSearch} onChange={(e) => setBillingSearch(e.target.value)} className="w-full p-2.5 pl-9 border rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-medium text-sm" />
                       <span className="absolute left-3 top-3 text-gray-400 text-sm">🔍</span>
                     </div>
