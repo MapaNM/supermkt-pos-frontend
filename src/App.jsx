@@ -5,7 +5,7 @@ import { db } from "./db";
 
 // 🛠️ HOSTING CONFIGURATION: Localhost සහ Render.com දෙකටම ගැලපෙන සේ පොදු URL එකක් සාදා ඇත
 // Render එකට දැමූ පසු "http://localhost:5008/api", https://supermkt-pos-backend.onrender.com/api වෙනුවට Render Live URL එක දමන්න
-const API_BASE_URL = "https://supermkt-pos-backend.onrender.com/api"; 
+const API_BASE_URL = "http://localhost:5008/api"; 
 
 // 🛠️ NEW: සියලුම Product Categories එකම තැනකින් manage කිරීමට (Admin dropdown + Billing sidebar දෙකටම use වේ)
 const PRODUCT_CATEGORIES = [
@@ -1054,7 +1054,7 @@ useEffect(() => {
       <div className="print:hidden flex flex-col h-full">
         {/* Header */}
         <header className="bg-slate-900 text-white px-6 py-2.5 flex justify-between items-center shadow-md">
-          <h1 className="text-xl font-black tracking-wider flex items-center gap-2">SmartStore <span className="bg-blue-600 px-2 py-0.5 rounded text-xs font-bold">PRO-POS v2.0</span></h1>
+          <h1 className="text-2xl font-black tracking-wider flex items-center gap-2">SmartStore</h1>
           <div className="flex space-x-3">
             <button onClick={() => setActiveTab("billing")} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${activeTab === "billing" ? "bg-blue-600 text-white shadow" : "text-gray-300 hover:bg-slate-800"}`}>Billing Window</button>
             <button onClick={() => { setActiveTab("returns"); resetReturnUI(); }} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${activeTab === "returns" ? "bg-amber-600 text-white shadow" : "text-gray-300 hover:bg-slate-800"}`}>🔄 Returns / Exchange</button>
@@ -2422,11 +2422,11 @@ useEffect(() => {
           {lastInvoiceNo || "N/A"}
         </div> */}
         <div className="text-[9px] pt-3 space-y-0.5">
-          {lastSaleIsOffline && (
+          {/* {lastSaleIsOffline && (
             <div className="text-red-600 font-bold">
               ⚠️ Offline බිල - Internet ලැබුනාට පස්සේ Sync වේ. Sync වෙනකම් Return/Exchange කළ නොහැක.
             </div>
-          )}
+          )} */}
 
           <div className="grid grid-cols-[65px_1fr]">
             <span className="font-bold">බිල්ප​ත් අංකය</span>
