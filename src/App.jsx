@@ -5,7 +5,7 @@ import { db } from "./db";
 
 // 🛠️ HOSTING CONFIGURATION: Localhost සහ Render.com දෙකටම ගැලපෙන සේ පොදු URL එකක් සාදා ඇත
 // Render එකට දැමූ පසු "http://localhost:5008/api", https://supermkt-pos-backend.onrender.com/api වෙනුවට Render Live URL එක දමන්න
-const API_BASE_URL = "https://supermkt-pos-backend.onrender.com/api"; 
+const API_BASE_URL = "http://localhost:5008/api"; 
 
 // 🛠️ NEW: සියලුම Product Categories එකම තැනකින් manage කිරීමට (Admin dropdown + Billing sidebar දෙකටම use වේ)
 const PRODUCT_CATEGORIES = [
@@ -29,6 +29,9 @@ function App() {
   const [products, setProducts] = useState([]);
   const [cart, setCart] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  // 🆕 MULTI-PRICE POPUP: Scan/Search කරන භාණ්ඩයට Price Batches කිහිපයක් තියෙනවා නම්, තෝරාගන්න popup එකට
+  const [multiPricePopup, setMultiPricePopup] = useState(null); // holds the product pending price selection
 
   // Search States
   const [billingSearch, setBillingSearch] = useState("");
@@ -89,7 +92,12 @@ function App() {
   // Product CRUD States
   const [isEditing, setIsEditing] = useState(false);
   const [editId, setEditId] = useState(null);
-  const [productForm, setProductForm] = useState({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "", expiryDate: "" });
+  const [productForm, setProductForm] = useState({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "", expiryDate: "", batches: [] });
+  // 🆕 MULTI-PRICE (Simplified): Edit කරන්න ගත්තු Product එකේ Database එකේ තියෙන Original Price/Stock එක මතක තියාගන්න (පරණ Batch එක Auto-සාදන්න)
+  const [editingOriginalProduct, setEditingOriginalProduct] = useState(null);
+  // 🆕 MULTI-PRICE (Simplified): "නව මිලකට Stock ලැබුනා" කියන mini-form එකේ state එක
+  const [showNewPriceEntry, setShowNewPriceEntry] = useState(false);
+  const [newPriceEntry, setNewPriceEntry] = useState({ price: "", qty: "", costPrice: "", discount: "" });
 
   // 🆕 RETURN / REFUND / EXCHANGE States
   const [returnInvoiceSearch, setReturnInvoiceSearch] = useState("");
@@ -512,7 +520,24 @@ useEffect(() => {
   };
 
   // --- BILLING LOGIC ---
-  const addToCart = (product) => {
+  // 🆕 MULTI-PRICE: භාණ්ඩයේ Active (තොග ඉතිරි ඇති) Price Batches ලබාගැනීමට Helper
+  const getActivePriceBatches = (product) => {
+    if (!Array.isArray(product.batches)) return [];
+    return product.batches.filter((b) => parseFloat(b.stock) > 0);
+  };
+
+  // 🆕 MULTI-PRICE: Batch එකකට Default Label එකක් සකසාගැනීම (Admin විසින් Label එකක් නොදුන්නොත්)
+  const getBatchDisplayLabel = (batch, index, total) => {
+    if (batch.label) return batch.label;
+    if (total <= 1) return "";
+    if (index === 0) return "පැරණි මිල";
+    if (index === total - 1) return "නව මිල";
+    return `මිල ${index + 1}`;
+  };
+
+  // 🛠️ UPDATED (Multi-Price Popup): scannedBatch එකක් දුන්නොත් කෙලින්ම එම මිලෙන් Cart එකට එකතු කරයි,
+  //     නැත්තම් Product එකට Price Batches කිහිපයක් තියෙනවනම් තෝරන්න Popup එක පෙන්වයි
+  const addToCart = (product, selectedBatch = null) => {
     // 🆕 EXPIRY CHECK: කල් ඉකුත් වූ භාණ්ඩයක් විකිණීමට ඉඩ නොදේ
     const expiryStatus = getExpiryStatus(product);
     if (expiryStatus === "expired") {
@@ -522,15 +547,50 @@ useEffect(() => {
       showToast(`⚠️ "${product.name}" ළඟදීම කල් ඉකුත් වේ (${new Date(product.expiryDate).toLocaleDateString()})! අවධානයෙන් විකුණන්න.`, "warning");
     }
 
-    const existingIndex = cart.findIndex((item) => item._id === product._id);
+    // 🆕 MULTI-PRICE CHECK: තෝරාගත් Batch එකක් තවම නැත්නම්, සහ Product එකට Active Batches 1කට වඩා තියෙනවනම් - Popup එක පෙන්වන්න
+    const activeBatches = getActivePriceBatches(product);
+    if (!selectedBatch && activeBatches.length > 1) {
+      setMultiPricePopup(product);
+      return;
+    }
+
+    // Batch එකක් තිබුනොත් (තෝරාගත්තෙකෝ, එකම එකක් තිබ්බෙකෝ), එහි මිල/තොගය use කරයි
+    const activeBatch = selectedBatch || (activeBatches.length === 1 ? activeBatches[0] : null);
+    const effectivePrice = activeBatch ? parseFloat(activeBatch.price) : parseFloat(product.price);
+    const batchId = activeBatch ? activeBatch.batchId : null; // 🛠️ Backend schema එකේ batch identity string එක (Mongo _id එක නෙමෙයි)
+    const batchIndex = activeBatch ? activeBatches.findIndex(b => b.batchId === batchId) : -1;
+    const batchLabel = activeBatch ? getBatchDisplayLabel(activeBatch, batchIndex, activeBatches.length) : null;
+    const batchCostPrice = activeBatch ? parseFloat(activeBatch.costPrice || product.costPrice || 0) : parseFloat(product.costPrice || 0);
+    const batchMarketPrice = activeBatch ? parseFloat(activeBatch.marketPrice || product.marketPrice || effectivePrice) : parseFloat(product.marketPrice || product.price);
+    // 🆕 මේ Batch එකටම ආවේණික වට්ටම % එක (batch.discount) - එය explicitly 0ට වඩා වැඩි විදිහට Set කරලා තියෙනවනම් විතරයි, Product-level Discount එක වෙනුවට මේකම භාවිතා කරයි
+    // (Default Batch එකකට discount නොදුන්නොත් 0ම තියෙන නිසා, සාමාන්‍ය Products වල Product-level Discount එක බිඳ වැටෙන්නේ නැති වෙන්න මේ ආරක්ෂාව)
+    const batchDiscount = activeBatch && parseFloat(activeBatch.discount) > 0
+      ? parseFloat(activeBatch.discount)
+      : parseFloat(product.discount || product.discountPercent || 0);
+    // 🆕 Cart line එකේ Unique Identity එක - එකම Product එකට Batch දෙකක් cart එකේ වෙන වෙනම පේන්න ඕන නිසා
+    const cartLineId = batchId ? `${product._id}__${batchId}` : product._id;
+
+    const existingIndex = cart.findIndex((item) => item.cartLineId === cartLineId);
     if (existingIndex !== -1) {
       const newCart = [...cart];
       newCart[existingIndex].qty = parseFloat(newCart[existingIndex].qty) + 1;
       setCart(newCart);
     } else {
-      setCart([...cart, { ...product, qty: 1 }]);
+      setCart([...cart, {
+        ...product,
+        qty: 1,
+        price: effectivePrice, // 🆕 තෝරාගත් Batch එකේ මිලෙන් Override කරයි
+        costPrice: batchCostPrice, // 🆕 එම Batch එකේම Cost Price එකෙන් ලාභය ගණනය වෙන්න
+        marketPrice: batchMarketPrice, // 🆕 එම Batch එකේම MRP එකෙන් Savings ගණනය වෙන්න
+        discount: batchDiscount, // 🆕 එම Batch එකේම වට්ටමෙන් වාර්තා නිවැරදිව ගණනය වෙන්න
+        discountPercent: batchDiscount, // 🛠️ discP ගණනය කරන කේතය item.discountPercent ප්‍රථමයෙන් බලන නිසා මෙතනත් set කරයි
+        batchId,
+        batchLabel,
+        cartLineId
+      }]);
     }
-    showToast(`"${product.name}" බිලට එකතු කලා`);
+    showToast(`"${product.name}"${batchLabel ? ` (${batchLabel} - රු.${effectivePrice.toFixed(2)})` : ""} බිලට එකතු කලා`);
+    setMultiPricePopup(null); // Popup එකෙන් තෝරාගත්තා නම් වහන්න
   };
 
   // Emergency Temp Item Add Logic (Does not hit DB, directly into Cart)
@@ -553,7 +613,8 @@ useEffect(() => {
       discountPercent: 0,
       unit: tempItemForm.unit,
       qty: parseFloat(tempItemForm.qty),
-      isTemporary: true 
+      isTemporary: true,
+      cartLineId: `temp_${Date.now()}` // 🛠️ Multi-Price cart line identity සමග ගැලපෙන්න
     };
 
     setCart([...cart, tempProduct]);
@@ -561,17 +622,18 @@ useEffect(() => {
     setTempItemForm({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
   };
 
-  const updateCartQtyDirectly = (id, value) => {
+  // 🛠️ UPDATED (Multi-Price): _id වෙනුවට cartLineId එකෙන් match කරයි (එකම Product එකට Batch දෙකක් cart එකේ තිබ්බොත් හසුරුවගන්න)
+  const updateCartQtyDirectly = (lineId, value) => {
     const newCart = cart.map((item) => {
-      if (item._id === id) return { ...item, qty: value };
+      if (item.cartLineId === lineId) return { ...item, qty: value };
       return item;
     });
     setCart(newCart);
   };
 
-  const updateQty = (id, amount) => {
+  const updateQty = (lineId, amount) => {
     const newCart = cart.map((item) => {
-      if (item._id === id) {
+      if (item.cartLineId === lineId) {
         const newQty = parseFloat(item.qty) + amount;
         return { ...item, qty: newQty < 0.001 ? 0.001 : newQty };
       }
@@ -602,9 +664,14 @@ useEffect(() => {
     for (const item of cart) {
       if (item.isTemporary) continue; 
       const dbProduct = products.find(p => p._id === item._id);
-      const availableStock = dbProduct ? dbProduct.stock : 0;
+      // 🛠️ UPDATED (Multi-Price): batchId එකක් තෝරලා තියෙනවනම්, ඒ Batch එකේම ඉතිරි තොගය පරීක්ෂා කරයි
+      let availableStock = dbProduct ? dbProduct.stock : 0;
+      if (item.batchId && dbProduct && Array.isArray(dbProduct.batches)) {
+        const dbBatch = dbProduct.batches.find(b => b.batchId === item.batchId);
+        availableStock = dbBatch ? parseFloat(dbBatch.stock) : 0;
+      }
       if (parseFloat(item.qty) > availableStock) {
-        return showToast(`🚫 තොග නොමැත! "${item.name}" තොගයේ ඇත්තේ: ${availableStock} ${item.unit || 'Kg'}`, "error");
+        return showToast(`🚫 තොග නොමැත! "${item.name}"${item.batchLabel ? ` (${item.batchLabel})` : ""} තොගයේ ඇත්තේ: ${availableStock} ${item.unit || 'Kg'}`, "error");
       }
     }
 
@@ -626,6 +693,7 @@ useEffect(() => {
       return {
         ...item,
         _id: item.isTemporary ? null : item._id,
+        batchId: item.batchId || null, // 🆕 Multi-Price: තෝරාගත් Batch එකෙන්ම තොගය අඩුවෙන්න server එකට යවයි
         discount: (parseFloat(item.price) * discP) / 100 
       };
     });
@@ -894,6 +962,21 @@ useEffect(() => {
   // --- PRODUCT CRUD LOGIC ---
   const handleFormSubmit = async (e) => {
     e.preventDefault();
+
+    // 🆕 MULTI-PRICE SAFETY CHECK: Main "Price" field එක කෙලින්ම වෙනස් කරලා, පරණ මිලේ ඉතුරු තොගයක් තියෙද්දී, 🔄 Button එකෙන් Multi-Price flow එකට නොගොස් Submit කරන්න හදනවනම් - අන්තිම වතාවක් Confirm කරගන්නවා
+    if (
+      isEditing && editingOriginalProduct &&
+      parseFloat(productForm.price) !== parseFloat(editingOriginalProduct.price) &&
+      parseFloat(editingOriginalProduct.stock) > 0 &&
+      !showNewPriceEntry &&
+      !(productForm.batches || []).some(b => parseFloat(b.price) === parseFloat(editingOriginalProduct.price) && parseFloat(b.stock) > 0)
+    ) {
+      const proceed = window.confirm(
+        `⚠️ ඔයා මිල රු.${parseFloat(editingOriginalProduct.price).toFixed(2)} ඉඳන් රු.${parseFloat(productForm.price).toFixed(2)} බවට වෙනස් කරනවා.\n\nපරණ මිලේ ඉතුරු තොගය (${editingOriginalProduct.stock}ක්) සම්පූර්ණයෙන්ම මැකිලා අලුත් මිලින්ම replace වේවි (Popup එකක් නැතුව).\n\nපරණ තොගයත් වෙනම විකුණන්න ඕන නම් "Cancel" කරලා 🔄 "නව මිලකට Stock ලැබුනාද?" Button එක Use කරන්න.\n\nඅනිවාර්යෙන්ම මෙහෙම Replace කරන්නද?`
+      );
+      if (!proceed) return;
+    }
+
     const submissionData = {
       name: productForm.name,
       marketPrice: parseFloat(productForm.marketPrice) || 0,
@@ -906,7 +989,18 @@ useEffect(() => {
       category: productForm.category,
       minStockLevel: parseFloat(productForm.minStockLevel) || 5,
       preferredSupplierId: productForm.preferredSupplierId || null,
-      expiryDate: productForm.expiryDate || null // 🆕 EXPIRY DATE
+      expiryDate: productForm.expiryDate || null, // 🆕 EXPIRY DATE
+      batches: (productForm.batches || []).map((b, index) => ({
+        // 🛠️ Backend Schema එකේ Batch Identity එක "batchId" (String) - Mongo _id එකෙන් වෙනස්. අලුත් batch එකකට generate කරයි, පරණ එකකට එකම batchId එකම යවයි (Edit කරද්දී Identity නොනැසී පවතින්න)
+        batchId: b.batchId || `B-${Date.now()}-${index}`,
+        label: b.label || "",
+        price: parseFloat(b.price) || 0,
+        costPrice: parseFloat(b.costPrice) || parseFloat(productForm.costPrice) || 0,
+        marketPrice: parseFloat(b.marketPrice) || parseFloat(productForm.marketPrice) || 0,
+        discount: parseFloat(b.discount) || 0, // 🆕 මේ Batch එකටම ආවේණික වට්ටම % - ලාභ වාර්තා නිවැරදිව ගණනය වෙන්න
+        stock: parseFloat(b.stock) || 0,
+        expiryDate: b.expiryDate || null
+      })) // 🆕 MULTI-PRICE: Old/New Price Batches (Backend Product Schema එකේ "batches" array එකට ගැලපෙන ආකාරයට)
     };
     try {
       if (isEditing) {
@@ -918,7 +1012,11 @@ useEffect(() => {
         await axios.post(`${API_BASE_URL}/products/add`, submissionData);
         showToast("අලුත් භාණ්ඩය සාර්ථකව ඩේටාබේස් එකට එකතු කලා! ✅");
       }
-      setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "", expiryDate: "" });
+      setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "", expiryDate: "", batches: [] });
+      setEditingOriginalProduct(null);
+      setShowNewPriceEntry(false);
+      setNewPriceEntry({ price: "", qty: "", costPrice: "", discount: "" });
+      setNewBatchRow({ label: "", price: "", stock: "" });
       fetchProducts();
       fetchExpiringProducts();
     } catch (error) { showToast("ක්‍රියාවලිය අසාර්ථකයි!", "error"); }
@@ -927,6 +1025,7 @@ useEffect(() => {
   const handleEditClick = (product) => {
     setIsEditing(true);
     setEditId(product._id);
+    setEditingOriginalProduct(product); // 🆕 MULTI-PRICE: DB එකේ තියෙන Original අගයන් මතක තියාගැනීම
     setProductForm({
       name: product.name.replace("⚠️ ", "").replace(" (Unsaved)", ""),
       marketPrice: product.marketPrice || "",
@@ -939,7 +1038,75 @@ useEffect(() => {
       category: product.category || "Grocery",
       minStockLevel: product.minStockLevel ?? 5,
       preferredSupplierId: product.preferredSupplierId || "",
-      expiryDate: product.expiryDate ? new Date(product.expiryDate).toISOString().split("T")[0] : "" // 🆕
+      expiryDate: product.expiryDate ? new Date(product.expiryDate).toISOString().split("T")[0] : "", // 🆕
+      batches: Array.isArray(product.batches) ? product.batches : [] // 🆕 MULTI-PRICE
+    });
+    setShowNewPriceEntry(false);
+    setNewPriceEntry({ price: "", qty: "", costPrice: "", discount: "" });
+  };
+
+  // 🆕 MULTI-PRICE (Simplified): "අලුතින් Stock ලැබුනා, මිලත් වෙනස්" කියන එකම action එකෙන් Batches Auto-සාදයි.
+  //     Admin ට "Batch" කියන වචනයවත් දැනගන්න ඕන නෑ - "නව මිල" + "ලැබුණු ප්‍රමාණය" විතරයි දාන්න ඕන.
+  const handleAddNewPricePoint = () => {
+    if (!newPriceEntry.price || parseFloat(newPriceEntry.price) <= 0) {
+      return showToast("නිවැරදි නව මිලක් ඇතුලත් කරන්න!", "warning");
+    }
+    if (newPriceEntry.qty === "" || parseFloat(newPriceEntry.qty) <= 0) {
+      return showToast("අලුතින් ලැබුණු ප්‍රමාණය ඇතුලත් කරන්න!", "warning");
+    }
+
+    let existingBatches = productForm.batches || [];
+
+    // 🆕 මේ Product එකට මේකයි පළමු වතාවට Multi-Price එකක් වෙන්නේ නම්, දැනට තියෙන (Database එකේ) මිල/තොගය/Cost/Discount "පැරණි මිල" Batch එකක් විදිහට ස්වයංක්‍රීයව සාදයි
+    if (existingBatches.length === 0 && editingOriginalProduct) {
+      const currentStock = parseFloat(editingOriginalProduct.stock) || 0;
+      if (currentStock > 0) {
+        existingBatches = [{
+          batchId: `B-old-${editingOriginalProduct._id}`,
+          label: "පැරණි මිල",
+          price: parseFloat(editingOriginalProduct.price) || 0,
+          costPrice: parseFloat(editingOriginalProduct.costPrice) || 0,
+          marketPrice: parseFloat(editingOriginalProduct.marketPrice) || 0,
+          discount: parseFloat(editingOriginalProduct.discount) || 0, // 🆕 පරණ Batch එකේම පරණ Discount එකත් රඳවාගනී
+          stock: currentStock
+        }];
+      }
+    }
+
+    const newBatch = {
+      batchId: `B-new-${Date.now()}`,
+      label: "නව මිල",
+      price: parseFloat(newPriceEntry.price),
+      costPrice: parseFloat(newPriceEntry.costPrice) || 0, // 🆕 මේ Batch එකටම ආවේණික Cost Price එක - ලාභය හරියටම ගණනය වෙන්න
+      marketPrice: parseFloat(productForm.marketPrice) || 0,
+      discount: parseFloat(newPriceEntry.discount) || 0, // 🆕 මේ Batch එකටම ආවේණික වට්ටම %
+      stock: parseFloat(newPriceEntry.qty)
+    };
+
+    const updatedBatches = [...existingBatches, newBatch];
+    const newTotalStock = updatedBatches.reduce((sum, b) => sum + (parseFloat(b.stock) || 0), 0);
+
+    setProductForm({
+      ...productForm,
+      batches: updatedBatches,
+      price: parseFloat(newPriceEntry.price), // 🆕 නවතම මිලම, ප්‍රධාන "අපේ මිල" විදිහට update වේ
+      costPrice: parseFloat(newPriceEntry.costPrice) || productForm.costPrice, // 🆕 නවතම Cost Price එකත් Main field එකට පෙන්නයි
+      discountPercent: newPriceEntry.discount || productForm.discountPercent, // 🆕 නවතම Discount එකත් Main field එකට පෙන්නයි
+      stock: String(newTotalStock) // 🆕 පැරණි + නව මුළු එකතුවට Auto-Sync
+    });
+    setNewPriceEntry({ price: "", qty: "", costPrice: "", discount: "" });
+    setShowNewPriceEntry(false);
+    showToast("✅ නව මිල එකතු කලා! පහළින් 'ඩේටාබේස් එකට එකතු කරන්න' click කර Save කරන්න.", "success");
+  };
+
+  // 🆕 MULTI-PRICE: වැරදුනොත් හෝ අවශ්‍ය නැති Batch එකක් නිවැරදි කරගැනීමට
+  const handleRemoveBatch = (index) => {
+    const updatedBatches = productForm.batches.filter((_, i) => i !== index);
+    const newTotalStock = updatedBatches.reduce((sum, b) => sum + (parseFloat(b.stock) || 0), 0);
+    setProductForm({
+      ...productForm,
+      batches: updatedBatches,
+      stock: updatedBatches.length > 0 ? String(newTotalStock) : productForm.stock
     });
   };
 
@@ -1051,6 +1218,59 @@ useEffect(() => {
         ))}
       </div>
 
+      {/* 🆕 MULTI-PRICE POPUP: භාණ්ඩයට Old/New Price Batches කිහිපයක් තියෙනවනම්, Scan/Search කරද්දී මිල තෝරගන්න */}
+      {multiPricePopup && (
+        <div
+          className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 print:hidden"
+          onClick={() => setMultiPricePopup(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-md relative overflow-hidden border border-slate-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-slate-900 text-white p-4 flex justify-between items-start">
+              <div>
+                <h3 className="text-sm font-black flex items-center gap-1.5">💰 මිල තෝරන්න (Select Price)</h3>
+                <p className="text-xs text-gray-300 mt-1 truncate">{multiPricePopup.name}</p>
+              </div>
+              <button onClick={() => setMultiPricePopup(null)} className="text-gray-300 hover:text-white font-black text-lg leading-none shrink-0 ml-2">✕</button>
+            </div>
+
+            <div className="p-4 space-y-2.5">
+              {/* <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5 font-semibold leading-snug">
+                ⚠️ පාරිභෝගිකයා අත ඇති පැකැට්ටුවේ මුද්‍රිත මිල (MRP) පරීක්ෂා කර, එයට ගැලපෙන මිල පහතින් තෝරන්න.
+              </p> */}
+
+              {(() => {
+                const activeBatches = getActivePriceBatches(multiPricePopup);
+                return activeBatches.map((batch, index) => (
+                  <button
+                    key={batch.batchId || index}
+                    onClick={() => addToCart(multiPricePopup, batch)}
+                    className="w-full flex justify-between items-center p-3.5 rounded-xl border-2 border-slate-200 hover:border-blue-500 hover:bg-blue-50 transition-all text-left active:scale-[0.98]"
+                  >
+                    <div>
+                      <span className="block text-[10px] font-black text-slate-400 uppercase tracking-wider">
+                        Option {String.fromCharCode(65 + index)}
+                        {getBatchDisplayLabel(batch, index, activeBatches.length) ? ` • ${getBatchDisplayLabel(batch, index, activeBatches.length)}` : ""}
+                      </span>
+                      <span className="block text-lg font-black text-blue-700">
+                        රු. {parseFloat(batch.price).toFixed(2)}/=
+                        {parseFloat(batch.discount) > 0 && <span className="ml-1.5 text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full align-middle font-black">{batch.discount}% OFF</span>}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="block text-[10px] font-bold text-gray-400">ඉතිරි තොගය</span>
+                      <span className="block text-sm font-black text-slate-800">{batch.stock} {multiPricePopup.unit || "Kg"}</span>
+                    </div>
+                  </button>
+                ));
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="print:hidden flex flex-col h-full">
         {/* Header */}
         <header className="bg-slate-900 text-white px-6 py-2.5 flex justify-between items-center shadow-md">
@@ -1092,24 +1312,27 @@ useEffect(() => {
                           const originalP = parseFloat(item.price);
                           const finalP = originalP - (originalP * discP) / 100;
                           return (
-                            <div key={item._id} className={`flex items-center justify-between p-3 rounded-xl border shadow-sm hover:bg-slate-100 transition-all ${item.isTemporary ? 'bg-amber-50/70 border-amber-300' : 'bg-slate-50 border-slate-200'}`}>
+                            <div key={item.cartLineId || item._id} className={`flex items-center justify-between p-3 rounded-xl border shadow-sm hover:bg-slate-100 transition-all ${item.isTemporary ? 'bg-amber-50/70 border-amber-300' : 'bg-slate-50 border-slate-200'}`}>
                               <div className="w-1/3">
-                                <span className="font-bold text-sm block text-slate-900 truncate">{item.name}</span>
+                                <span className="font-bold text-sm block text-slate-900 truncate">
+                                  {item.name}
+                                  {item.batchLabel && <span className="ml-1.5 text-[9px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-black align-middle">{item.batchLabel}</span>}
+                                </span>
                                 <span className="text-[11px] text-gray-500 block">1 {item.unit || "Kg"} = රු. {originalP.toFixed(2)}</span>
                               </div>
                               
                               <div className="flex items-center space-x-1 bg-white p-1 rounded-lg border border-slate-300">
-                                <button onClick={() => updateQty(item._id, -1)} className="bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded font-bold text-xs">-1</button>
-                                {item.unit === "Kg" && <button onClick={() => updateQty(item._id, -0.1)} className="bg-slate-100 hover:bg-slate-200 px-1 py-1 rounded text-[10px] text-gray-600">-100g</button>}
+                                <button onClick={() => updateQty(item.cartLineId, -1)} className="bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded font-bold text-xs">-1</button>
+                                {item.unit === "Kg" && <button onClick={() => updateQty(item.cartLineId, -0.1)} className="bg-slate-100 hover:bg-slate-200 px-1 py-1 rounded text-[10px] text-gray-600">-100g</button>}
                                 <input 
                                   type="number" 
                                   step="0.001"
                                   value={item.qty} 
-                                  onChange={(e) => updateCartQtyDirectly(item._id, e.target.value)}
+                                  onChange={(e) => updateCartQtyDirectly(item.cartLineId, e.target.value)}
                                   className="w-16 text-center font-black text-sm text-blue-700 focus:outline-none" 
                                 />
-                                {item.unit === "Kg" && <button onClick={() => updateQty(item._id, 0.1)} className="bg-slate-100 hover:bg-slate-200 px-1 py-1 rounded text-[10px] text-gray-600">+100g</button>}
-                                <button onClick={() => updateQty(item._id, 1)} className="bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded font-bold text-xs">+1</button>
+                                {item.unit === "Kg" && <button onClick={() => updateQty(item.cartLineId, 0.1)} className="bg-slate-100 hover:bg-slate-200 px-1 py-1 rounded text-[10px] text-gray-600">+100g</button>}
+                                <button onClick={() => updateQty(item.cartLineId, 1)} className="bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded font-bold text-xs">+1</button>
                                 <span className="text-xs text-gray-500 font-bold px-1">{item.unit || "Kg"}</span>
                               </div>
 
@@ -1117,7 +1340,7 @@ useEffect(() => {
                                 <span className="font-black text-sm block text-slate-900">රු. {(finalP * parseFloat(item.qty || 0)).toFixed(2)}</span>
                                 {discP > 0 && <span className="text-[10px] bg-red-100 text-red-600 font-bold px-1.5 py-0.2 rounded">{discP}% OFF</span>}
                               </div>
-                              <button onClick={() => { setCart(cart.filter(c => c._id !== item._id)); showToast("භාණ්ඩය ඉවත් කලා"); }} className="text-gray-400 hover:text-red-500 font-bold p-1">✕</button>
+                              <button onClick={() => { setCart(cart.filter(c => c.cartLineId !== item.cartLineId)); showToast("භාණ්ඩය ඉවත් කලා"); }} className="text-gray-400 hover:text-red-500 font-bold p-1">✕</button>
                             </div>
                           );
                         })}
@@ -1384,6 +1607,7 @@ useEffect(() => {
                         const finalPrice = product.price - (product.price * discP) / 100;
                         const isLowStock = product.stock <= (product.minStockLevel ?? 5);
                         const expStatus = getExpiryStatus(product);
+                        const hasMultiPrice = getActivePriceBatches(product).length > 1; // 🆕 MULTI-PRICE badge
                         
                         return (
                           <button 
@@ -1400,6 +1624,7 @@ useEffect(() => {
                             }`}
                           >
                             {discP > 0 && <span className="absolute top-1 right-1 bg-red-500 text-white text-[9px] px-1.5 rounded-full font-bold">{discP}% OFF</span>}
+                            {hasMultiPrice && <span className="absolute top-1 left-1 bg-purple-600 text-white text-[9px] px-1.5 rounded-full font-bold">💰 Multi-Price</span>}
                             <div className="font-bold text-slate-800 text-xs truncate">{product.name}</div>
                             <div className="text-blue-600 font-black text-sm mt-1">රු. {finalPrice.toFixed(2)}</div>
                             <div className={`text-[10px] font-bold mt-1 ${isLowStock ? 'text-red-700 bg-red-200 px-1 py-0.5 rounded w-fit' : 'text-gray-400'}`}>
@@ -1698,14 +1923,30 @@ useEffect(() => {
                         <div>
                           <label className="text-[11px] font-bold text-gray-600 block mb-1">අපේ විකුණුම් මිල (Our Price):</label>
                           <input type="number" required value={productForm.price} onChange={(e) => setProductForm({ ...productForm, price: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white" />
+                          {/* 🆕 MULTI-PRICE WARNING: Admin මේ field එකම කෙලින්ම වෙනස් කරනවනම් - පරණ මිල නැති වී යනවා කියලා කලින්ම කියයි */}
+                          {isEditing && editingOriginalProduct && parseFloat(productForm.price) !== parseFloat(editingOriginalProduct.price) && !showNewPriceEntry && parseFloat(editingOriginalProduct.stock) > 0 && (
+                            <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-1.5 mt-1 leading-snug">
+                              ⚠️ මෙහෙම කෙලින්ම මිල වෙනස් කළොත්, පරණ මිල (රු.{parseFloat(editingOriginalProduct.price).toFixed(2)}) සම්පූර්ණයෙන්ම මැකිලා අලුත් මිලින්ම replace වෙනවා — Popup එකක් පේන්නෙත් නෑ.
+                              පරණ මිලේ ඉතුරු තොගයත් ({editingOriginalProduct.stock}ක්) වෙනම විකුණන්න ඕන නම්, මේ field එක <b>ආපහු පරණ අගයට</b> දාලා, පහළින් තියෙන <b>🔄 "නව මිලකට Stock ලැබුනාද?"</b> Button එකෙන් විතරක් අලුත් මිල දාන්න.
+                            </p>
+                          )}
                         </div>
                         <div>
                           <label className="text-[11px] font-bold text-gray-600 block mb-1">ගැනුම් මිල (Cost Price):</label>
                           <input type="number" required value={productForm.costPrice} onChange={(e) => setProductForm({ ...productForm, costPrice: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white" />
                         </div>
                         <div>
-                          <label className="text-[11px] font-bold text-gray-600 block mb-1">ආරම්භක තොගය (Stock Qty):</label>
-                          <input type="number" required value={productForm.stock} onChange={(e) => setProductForm({ ...productForm, stock: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white" />
+                          <label className="text-[11px] font-bold text-gray-600 block mb-1">
+                            ආරම්භක තොගය (Stock Qty):
+                            {productForm.batches && productForm.batches.length > 0 && <span className="text-purple-600"> — Batches වලින් Auto-Calculate 🔒</span>}
+                          </label>
+                          <input
+                            type="number" required
+                            readOnly={productForm.batches && productForm.batches.length > 0}
+                            value={productForm.stock}
+                            onChange={(e) => setProductForm({ ...productForm, stock: e.target.value })}
+                            className={`w-full p-2 border rounded text-xs focus:bg-white ${productForm.batches && productForm.batches.length > 0 ? "bg-purple-50 text-purple-800 font-bold cursor-not-allowed" : "bg-gray-50"}`}
+                          />
                         </div>
                         <div>
                           <label className="text-[11px] font-bold text-gray-600 block mb-1">බාර්කෝඩ් අංකය (Barcode - Optional):</label>
@@ -1750,8 +1991,75 @@ useEffect(() => {
                           <label className="text-[11px] font-bold text-gray-600 block mb-1">⏳ කල් ඉකුත් වන දිනය (Expiry Date - Optional):</label>
                           <input type="date" value={productForm.expiryDate} onChange={(e) => setProductForm({ ...productForm, expiryDate: e.target.value })} className="w-full p-2 border rounded text-xs bg-orange-50/50 font-bold" />
                         </div>
+                        {/* 🆕 MULTI-PRICE (Simplified): "Batch" කියන වචනයවත් නැතුව, එකම action එකෙන් (Edit කරද්දී විතරයි පේනවා) */}
+                        {isEditing && (
+                          <div className="col-span-2 md:col-span-4 border-t-2 border-purple-200 pt-3 mt-1 bg-purple-50/30 -mx-1 px-2 py-2 rounded-lg">
+
+                            {/* දැනටමත් Multi-Price එකක් තියෙනවනම්, ඒවා සරලව Summary chips විදිහට පෙන්වයි */}
+                            {productForm.batches && productForm.batches.length > 0 && (
+                              <div className="mb-2">
+                                <p className="text-[10px] font-black text-purple-800 uppercase mb-1">💰 මේ භාණ්ඩයට දැනට තියෙන මිල ගණන්:</p>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {productForm.batches.map((batch, index) => (
+                                    <span key={index} className="inline-flex items-center gap-1.5 bg-white border border-purple-300 rounded-full pl-3 pr-1 py-1 text-[11px] font-bold text-slate-700">
+                                      {batch.label || `මිල ${index + 1}`}: රු.{parseFloat(batch.price || 0).toFixed(2)} ({batch.stock}ක්)
+                                      {parseFloat(batch.costPrice) > 0 && <span className="text-gray-400 font-normal">| පිරිවැය: රු.{parseFloat(batch.costPrice).toFixed(2)}</span>}
+                                      {parseFloat(batch.discount) > 0 && <span className="text-red-500 font-normal">| {batch.discount}% OFF</span>}
+                                      <button type="button" onClick={() => handleRemoveBatch(index)} className="text-red-400 hover:text-red-600 font-black w-4 h-4 flex items-center justify-center rounded-full hover:bg-red-50">✕</button>
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {!showNewPriceEntry ? (
+                              <button
+                                type="button"
+                                onClick={() => setShowNewPriceEntry(true)}
+                                className="w-full flex items-center justify-center gap-2 bg-purple-100 hover:bg-purple-200 border border-purple-300 text-purple-800 font-bold py-2 rounded-lg text-xs transition-all"
+                              >
+                                🔄 නව මිලකට Stock ලැබුනාද? (Multi-Price) — Click කරන්න
+                              </button>
+                            ) : (
+                              <div className="bg-white border border-purple-300 rounded-lg p-3 space-y-2">
+                                <p className="text-[10px] text-gray-500 leading-relaxed">
+                                  පරණ තොගය (රු.{editingOriginalProduct ? parseFloat(editingOriginalProduct.price || 0).toFixed(2) : "0.00"} ට {editingOriginalProduct?.stock ?? 0}ක්) ඒ විදිහටම විකුණන්න පුළුවන්ව තියේවි.
+                                  මෙතන දාන්නේ <b>අලුතින්</b> ලැබුණු Stock එකේ මිල සහ ප්‍රමාණය විතරයි:
+                                </p>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <label className="text-[10px] font-bold text-gray-500 block mb-1">නව විකුණුම් මිල (රු.):</label>
+                                    <input type="number" placeholder="උදා: 1050" value={newPriceEntry.price} onChange={(e) => setNewPriceEntry({ ...newPriceEntry, price: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-purple-800 bg-purple-50/30" />
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-bold text-gray-500 block mb-1">අලුතින් ලැබුණු ප්‍රමාණය:</label>
+                                    <input type="number" placeholder="උදා: 20" value={newPriceEntry.qty} onChange={(e) => setNewPriceEntry({ ...newPriceEntry, qty: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-purple-800 bg-purple-50/30" />
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-bold text-gray-500 block mb-1">🆕 මේ Stock එකේ පිරිවැය මිල (Cost Price):</label>
+                                    <input type="number" placeholder="උදා: 880" value={newPriceEntry.costPrice} onChange={(e) => setNewPriceEntry({ ...newPriceEntry, costPrice: e.target.value })} className="w-full p-2 border rounded text-xs font-bold text-slate-700 bg-slate-50" />
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-bold text-gray-500 block mb-1">🆕 මේ Stock එකට වට්ටම % (Optional):</label>
+                                    <input type="number" placeholder="උදා: 5" value={newPriceEntry.discount} onChange={(e) => setNewPriceEntry({ ...newPriceEntry, discount: e.target.value })} className="w-full p-2 border rounded text-xs font-bold text-slate-700 bg-slate-50" />
+                                  </div>
+                                </div>
+                                <p className="text-[9px] text-gray-400 leading-snug">💡 Cost Price එක නිවැරදිව දැම්මොත් විතරයි, විකුණුම් වාර්තා වල මේ Stock එකෙන්ම ලැබෙන ලාභය හරියටම පෙන්වන්නේ.</p>
+                                <div className="flex gap-2">
+                                  <button type="button" onClick={() => { setShowNewPriceEntry(false); setNewPriceEntry({ price: "", qty: "", costPrice: "", discount: "" }); }} className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-700 py-1.5 rounded text-xs font-bold">අවලංගු කරන්න</button>
+                                  <button type="button" onClick={handleAddNewPricePoint} className="flex-1 bg-purple-600 hover:bg-purple-700 text-white py-1.5 rounded text-xs font-bold">✔️ එකතු කරන්න</button>
+                                </div>
+                              </div>
+                            )}
+
+                            {productForm.batches && productForm.batches.length > 1 && (
+                              <p className="text-[10px] text-emerald-700 font-semibold mt-2">✅ මිල 2ක් හෝ වැඩි ගණනක් තියෙන නිසා, Billing screen එකේදී Scan/Search කරද්දී මිල තෝරන්න Popup එකක් පේනවා.</p>
+                            )}
+                          </div>
+                        )}
+
                         <div className="col-span-2 md:col-span-4 flex justify-end gap-2 pt-2">
-                          {isEditing && <button type="button" onClick={() => { setIsEditing(false); setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "", expiryDate: "" }); }} className="bg-gray-500 text-white px-4 py-2 rounded text-xs font-bold">Cancel</button>}
+                          {isEditing && <button type="button" onClick={() => { setIsEditing(false); setEditingOriginalProduct(null); setProductForm({ name: "", marketPrice: "", price: "", costPrice: "", stock: "", barcode: "", discountPercent: "", unit: "Kg", category: "Grocery", minStockLevel: "5", preferredSupplierId: "", expiryDate: "", batches: [] }); setShowNewPriceEntry(false); setNewPriceEntry({ price: "", qty: "", costPrice: "", discount: "" }); }} className="bg-gray-500 text-white px-4 py-2 rounded text-xs font-bold">Cancel</button>}
                           <button type="submit" className="bg-blue-600 text-white px-6 py-2 rounded text-xs font-bold shadow-md">{isEditing ? "යාවත්කාලීන කරන්න" : "ඩේටාබේස් එකට එකතු කරන්න"}</button>
                         </div>
                       </form>
@@ -2467,7 +2775,7 @@ useEffect(() => {
             const unitSymbol = unitSymbols[item.unit] || "";
 
             return (
-              <div key={item._id, index} className="text-[10px] border-b border-dotted pb-1">
+              <div key={(item._id, index)} className="text-[10px] border-b border-dotted pb-1">
                 <div className="font-bold text-[11px]">{index + 1}. {item.name}</div>
                 <div className="grid grid-cols-12 text-slate-900 mt-0.5">
                   <div className="col-span-4 text-center font-semibold">{qtyParsed} {unitSymbol}</div>
