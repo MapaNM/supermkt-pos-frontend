@@ -23,6 +23,27 @@ const PRODUCT_CATEGORIES = [
   { value: "Other", label: "Other (වෙනත්)", icon: "📦" },
 ];
 
+// 🛠️ NEW: Unit symbols - centralized (Unit නොමැති/Empty items සඳහාත් "" handle කරයි)
+const UNIT_SYMBOLS = { Kg: "kg", G: "g", Pieces: "Pieces", Packet: "Packet", Bottle: "Bottle", "": "" };
+
+// 🛠️ NEW: JavaScript Floating-Point Precision Errors (0.1 + 0.2 = 0.30000000000000004 වගේ) නිවැරදි කිරීමට
+// දශම ස්ථාන 3කට Round කරයි (Grams level accuracy - 1g දක්වා නිවැරදියි, ඊට වඩා අනවශ්‍ය decimal noise ඉවත් කරයි)
+const roundQty = (num) => Math.round((parseFloat(num) || 0) * 1000) / 1000;
+
+// 🛠️ NEW: Quantity + Unit එක Standard විදිහට Format කිරීම
+// - "Kg" Unit එකේදී, ප්‍රමාණය 1ට වඩා අඩු නම් (උදා: 0.5 Kg) → ග්‍රෑම් වලට Convert කර "500g" විදිහට පෙන්වයි
+// - අනිත් සියලුම Units වලට, සාමාන්‍ය symbol එකම (kg/Pieces/Packet/Bottle) පෙන්වයි
+// - Unit එකක් තෝරලා නැත්නම් (Empty), symbol එකක් නැතුව ප්‍රමාණය විතරක් පෙන්වයි
+const formatQtyWithUnit = (qty, unit) => {
+  const qtyNum = roundQty(qty); // 🛠️ Floating-point drift (3.5500000000000007 වගේ) මෙතනින්ම clean වෙනවා
+  if (unit === "Kg" && qtyNum > 0 && qtyNum < 1) {
+    const grams = Math.round(qtyNum * 1000);
+    return `${grams}g`;
+  }
+  const symbol = UNIT_SYMBOLS[unit] ?? unit ?? "";
+  return symbol ? `${qtyNum} ${symbol}` : `${qtyNum}`;
+};
+
 function App() {
   const [activeTab, setActiveTab] = useState("billing");
   const [adminSubTab, setAdminSubTab] = useState("products");
@@ -471,7 +492,7 @@ useEffect(() => {
     setGrnItems([...grnItems, {
       productId: product._id,
       productName: product.name,
-      unit: product.unit || "Kg",
+      unit: product.unit ?? "Kg",
       quantity: parseFloat(grnCurrentItem.quantity),
       costPrice: parseFloat(grnCurrentItem.costPrice),
       stockMode: grnCurrentItem.stockMode || "add"
@@ -634,7 +655,7 @@ useEffect(() => {
   const updateQty = (lineId, amount) => {
     const newCart = cart.map((item) => {
       if (item.cartLineId === lineId) {
-        const newQty = parseFloat(item.qty) + amount;
+        const newQty = roundQty(parseFloat(item.qty) + amount); // 🛠️ Repeated -100g/+100g clicks drift වළක්වයි
         return { ...item, qty: newQty < 0.001 ? 0.001 : newQty };
       }
       return item;
@@ -671,7 +692,7 @@ useEffect(() => {
         availableStock = dbBatch ? parseFloat(dbBatch.stock) : 0;
       }
       if (parseFloat(item.qty) > availableStock) {
-        return showToast(`🚫 තොග නොමැත! "${item.name}"${item.batchLabel ? ` (${item.batchLabel})` : ""} තොගයේ ඇත්තේ: ${availableStock} ${item.unit || 'Kg'}`, "error");
+        return showToast(`🚫 තොග නොමැත! "${item.name}"${item.batchLabel ? ` (${item.batchLabel})` : ""} තොගයේ ඇත්තේ: ${formatQtyWithUnit(availableStock, item.unit ?? 'Kg')}`, "error");
       }
     }
 
@@ -1016,7 +1037,6 @@ useEffect(() => {
       setEditingOriginalProduct(null);
       setShowNewPriceEntry(false);
       setNewPriceEntry({ price: "", qty: "", costPrice: "", discount: "" });
-      setNewBatchRow({ label: "", price: "", stock: "" });
       fetchProducts();
       fetchExpiringProducts();
     } catch (error) { showToast("ක්‍රියාවලිය අසාර්ථකයි!", "error"); }
@@ -1034,7 +1054,7 @@ useEffect(() => {
       stock: product.stock,
       barcode: product.barcode || "",
       discountPercent: product.discount || "", 
-      unit: product.unit || "Kg",
+      unit: product.unit ?? "Kg",
       category: product.category || "Grocery",
       minStockLevel: product.minStockLevel ?? 5,
       preferredSupplierId: product.preferredSupplierId || "",
@@ -1261,7 +1281,7 @@ useEffect(() => {
                     </div>
                     <div className="text-right">
                       <span className="block text-[10px] font-bold text-gray-400">ඉතිරි තොගය</span>
-                      <span className="block text-sm font-black text-slate-800">{batch.stock} {multiPricePopup.unit || "Kg"}</span>
+                      <span className="block text-sm font-black text-slate-800">{formatQtyWithUnit(batch.stock, multiPricePopup.unit ?? "Kg")}</span>
                     </div>
                   </button>
                 ));
@@ -1318,7 +1338,7 @@ useEffect(() => {
                                   {item.name}
                                   {item.batchLabel && <span className="ml-1.5 text-[9px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-black align-middle">{item.batchLabel}</span>}
                                 </span>
-                                <span className="text-[11px] text-gray-500 block">1 {item.unit || "Kg"} = රු. {originalP.toFixed(2)}</span>
+                                <span className="text-[11px] text-gray-500 block">1 {item.unit ?? "Kg"} = රු. {originalP.toFixed(2)}</span>
                               </div>
                               
                               <div className="flex items-center space-x-1 bg-white p-1 rounded-lg border border-slate-300">
@@ -1333,7 +1353,7 @@ useEffect(() => {
                                 />
                                 {item.unit === "Kg" && <button onClick={() => updateQty(item.cartLineId, 0.1)} className="bg-slate-100 hover:bg-slate-200 px-1 py-1 rounded text-[10px] text-gray-600">+100g</button>}
                                 <button onClick={() => updateQty(item.cartLineId, 1)} className="bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded font-bold text-xs">+1</button>
-                                <span className="text-xs text-gray-500 font-bold px-1">{item.unit || "Kg"}</span>
+                                <span className="text-xs text-gray-500 font-bold px-1">{item.unit ?? "Kg"}</span>
                               </div>
 
                               <div className="text-right w-1/4">
@@ -1526,6 +1546,7 @@ useEffect(() => {
                               onChange={(e) => setTempItemForm({ ...tempItemForm, unit: e.target.value })}
                               className="p-2 text-xs bg-white border border-amber-300 rounded-lg font-bold"
                             >
+                              <option value="">-- Unit නැත --</option>
                               <option value="Kg">Kilogram (Kg)</option>
                               <option value="G">Gram (G)</option>
                               <option value="Pieces">Pieces</option>
@@ -1595,7 +1616,7 @@ useEffect(() => {
                       <span className="absolute left-3 top-3 text-gray-400 text-sm">🔍</span>
                     </div>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1 pl-1 overflow-auto">
                       {filteredBillingProducts.length === 0 && (
                         <div className="col-span-2 sm:col-span-3 flex flex-col items-center justify-center text-gray-400 py-10">
                           <span className="text-3xl mb-2">🔍</span>
@@ -1628,7 +1649,7 @@ useEffect(() => {
                             <div className="font-bold text-slate-800 text-xs truncate">{product.name}</div>
                             <div className="text-blue-600 font-black text-sm mt-1">රු. {finalPrice.toFixed(2)}</div>
                             <div className={`text-[10px] font-bold mt-1 ${isLowStock ? 'text-red-700 bg-red-200 px-1 py-0.5 rounded w-fit' : 'text-gray-400'}`}>
-                              {isLowStock ? `⚠️ අඩු තොග (Low): ${product.stock}` : `තොග: ${product.stock}`} {product.unit || "Kg"}
+                              {isLowStock ? `⚠️ අඩු තොග (Low): ${formatQtyWithUnit(product.stock, product.unit ?? "Kg")}` : `තොග: ${formatQtyWithUnit(product.stock, product.unit ?? "Kg")}`}
                             </div>
                             {expStatus === "expired" && <div className="text-[10px] font-black mt-1 text-white bg-gray-600 px-1 py-0.5 rounded w-fit">⛔ EXPIRED</div>}
                             {expStatus === "expiring" && <div className="text-[10px] font-black mt-1 text-amber-800 bg-amber-200 px-1 py-0.5 rounded w-fit">⏳ {new Date(product.expiryDate).toLocaleDateString()}</div>}
@@ -1955,6 +1976,7 @@ useEffect(() => {
                         <div>
                           <label className="text-[11px] font-bold text-gray-600 block mb-1">භාණ්ඩයේ ප්‍රමාණය මනින ඒකකය (Unit):</label>
                           <select value={productForm.unit} onChange={(e) => setProductForm({ ...productForm, unit: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 text-gray-700">
+                            <option value="">-- Unit නැත --</option>
                             <option value="Kg">Kilogram (Kg)</option>
                             <option value="G">Gram (G)</option>
                             <option value="Pieces">Pieces</option>
@@ -2102,7 +2124,7 @@ useEffect(() => {
                               <td className="p-3 text-right text-gray-500">රු. {p.marketPrice?.toFixed(2) || p.price?.toFixed(2)}</td>
                               <td className="p-3 text-right font-black text-blue-600">රු. {p.price.toFixed(2)}</td>
                               <td className="p-3 text-right text-emerald-700">රු. {p.costPrice?.toFixed(2) || "0.00"}</td>
-                              <td className="p-3 text-center font-black"><span className={`px-2 py-0.5 rounded-sm ${p.stock > (p.minStockLevel ?? 5) ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600'}`}>{p.stock} {p.unit || 'Kg'}</span></td>
+                              <td className="p-3 text-center font-black"><span className={`px-2 py-0.5 rounded-sm ${p.stock > (p.minStockLevel ?? 5) ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600'}`}>{formatQtyWithUnit(p.stock, p.unit ?? 'Kg')}</span></td>
                               <td className="p-3 text-center text-red-500 font-bold">{p.discount || 0}% OFF</td>
                               <td className="p-3 text-center">
                                 {p.expiryDate ? (
@@ -2165,9 +2187,9 @@ useEffect(() => {
                                 {productsGroup.map((p) => (
                                   <tr key={p._id} className="hover:bg-red-50/40">
                                     <td className="p-3 font-bold text-slate-900">{p.name}</td>
-                                    <td className="p-3 text-center"><span className="bg-red-100 text-red-600 px-2 py-0.5 rounded-full font-black">{p.stock} {p.unit || "Kg"}</span></td>
-                                    <td className="p-3 text-center text-gray-500">{p.minStockLevel ?? 5} {p.unit || "Kg"}</td>
-                                    <td className="p-3 text-center font-black text-emerald-700">{getSuggestedReorderQty(p)} {p.unit || "Kg"}</td>
+                                    <td className="p-3 text-center"><span className="bg-red-100 text-red-600 px-2 py-0.5 rounded-full font-black">{formatQtyWithUnit(p.stock, p.unit ?? "Kg")}</span></td>
+                                    <td className="p-3 text-center text-gray-500">{formatQtyWithUnit(p.minStockLevel ?? 5, p.unit ?? "Kg")}</td>
+                                    <td className="p-3 text-center font-black text-emerald-700">{formatQtyWithUnit(getSuggestedReorderQty(p), p.unit ?? "Kg")}</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -2207,7 +2229,7 @@ useEffect(() => {
                             {expiringProducts.map((p) => (
                               <tr key={p._id} className={p.expiryStatus === "expired" ? "bg-red-50/60" : "bg-amber-50/40"}>
                                 <td className="p-3 font-bold text-slate-900">{p.name}</td>
-                                <td className="p-3 text-center">{p.stock} {p.unit || "Kg"}</td>
+                                <td className="p-3 text-center">{formatQtyWithUnit(p.stock, p.unit ?? "Kg")}</td>
                                 <td className="p-3 text-center font-bold">{new Date(p.expiryDate).toLocaleDateString()}</td>
                                 <td className="p-3 text-center">
                                   <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${p.expiryStatus === "expired" ? "bg-red-600 text-white" : "bg-amber-400 text-amber-950"}`}>
@@ -2394,7 +2416,7 @@ useEffect(() => {
                             >
                               <option value="">භාණ්ඩය තෝරන්න...</option>
                               {products.map(p => (
-                                <option key={p._id} value={p._id}>{p.name} (වත්මන් තොගය: {p.stock} {p.unit || "Kg"})</option>
+                                <option key={p._id} value={p._id}>{p.name} (වත්මන් තොගය: {formatQtyWithUnit(p.stock, p.unit ?? "Kg")})</option>
                               ))}
                             </select>
 
@@ -2458,7 +2480,7 @@ useEffect(() => {
                                           <span className="ml-1.5 text-[8px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-black align-middle">SET</span>
                                         )}
                                       </p>
-                                      <p className="text-[10px] text-gray-500">{item.quantity} {item.unit} × රු.{item.costPrice.toFixed(2)}</p>
+                                      <p className="text-[10px] text-gray-500">{formatQtyWithUnit(item.quantity, item.unit)} × රු.{item.costPrice.toFixed(2)}</p>
                                     </div>
                                     <div className="flex items-center gap-2">
                                       <span className="font-black text-amber-700">රු.{(item.quantity * item.costPrice).toFixed(2)}</span>
@@ -2729,13 +2751,9 @@ useEffect(() => {
         {/* <div className="text-center font-black text-[13px] tracking-wider border border-red-600 rounded px-2 py-1 my-1 inline-block mx-auto w-full">
           {lastInvoiceNo || "N/A"}
         </div> */}
-        <div className="text-[9px] pt-3 space-y-0.5">
-          {/* {lastSaleIsOffline && (
-            <div className="text-red-600 font-bold">
-              ⚠️ Offline බිල - Internet ලැබුනාට පස්සේ Sync වේ. Sync වෙනකම් Return/Exchange කළ නොහැක.
-            </div>
-          )} */}
-
+        <hr className="border-dotted border-black my-2" />
+        <div className="text-[9px] space-y-0.5">
+          
           <div className="grid grid-cols-[65px_1fr]">
             <span className="font-bold">බිල්ප​ත් අංකය</span>
             <span>: {lastInvoiceNo || "N/A"}</span>
@@ -2756,6 +2774,7 @@ useEffect(() => {
         <hr className="border-dotted border-black my-2" />
         
         {/* Table Headers */}
+        <div className="text-[10px] font-bold">භාණ්ඩ​ය &</div>
         <div className="grid grid-cols-12 font-bold text-[10px] border-b border-dotted pb-0.5 mb-1 text-center bg-gray-100 p-0.5">
           <div className="col-span-4">ප්‍රමාණය</div>
           <div className="col-span-3">සා.මිල</div>
@@ -2771,14 +2790,12 @@ useEffect(() => {
             const discountAmount = (originalPrice * discPercent) / 100;
             const finalPrice = originalPrice - discountAmount;
             const qtyParsed = parseFloat(item.qty) || 0;
-            const unitSymbols = { Kg: "kg", G: "g", Pieces: "Pieces", Packet: "Packet", Bottle: "Bottle" };
-            const unitSymbol = unitSymbols[item.unit] || "";
 
             return (
               <div key={(item._id, index)} className="text-[10px] border-b border-dotted pb-1">
                 <div className="font-bold text-[11px]">{index + 1}. {item.name}</div>
                 <div className="grid grid-cols-12 text-slate-900 mt-0.5">
-                  <div className="col-span-4 text-center font-semibold">{qtyParsed} {unitSymbol}</div>
+                  <div className="col-span-4 text-center font-semibold">{formatQtyWithUnit(item.qty, item.unit)}</div>
                   <div className="col-span-3 text-center">{Number(item.marketPrice || item.price).toFixed(2)}</div>
                   <div className="col-span-2 text-center">{originalPrice.toFixed(2)}</div>
                   <div className="col-span-3 text-right font-black">{(finalPrice * qtyParsed).toFixed(2)}</div>
