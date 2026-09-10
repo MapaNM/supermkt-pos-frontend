@@ -141,7 +141,8 @@ function App() {
   const [lastSaleIsOffline, setLastSaleIsOffline] = useState(false);
 
   // Emergency Temp Item Form State (For Any Role)
-  const [tempItemForm, setTempItemForm] = useState({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
+  const [tempItemForm, setTempItemForm] = useState({ name: "", price: "", qty: "1", unit: "", barcode: "" });
+  const [registerTempAsProduct, setRegisterTempAsProduct] = useState(false); // 🆕 Emergency item එකත් Database එකට Register කරනවද
 
   const [showTempItemModal, setShowTempItemModal] = useState(false);
 
@@ -615,25 +616,80 @@ useEffect(() => {
   };
 
   // Emergency Temp Item Add Logic (Does not hit DB, directly into Cart)
-  const handleAddTempItemToCart = (e) => {
+  const handleAddTempItemToCart = async (e) => {
     e.preventDefault();
     if (!tempItemForm.name || !tempItemForm.price || !tempItemForm.qty) {
       return showToast("කරුණාකර නම, මිල සහ ප්‍රමාණය ඇතුලත් කරන්න!", "warning");
+    }
+
+    const qty = parseFloat(tempItemForm.qty);
+    const price = parseFloat(tempItemForm.price);
+
+    // 🆕 "Database එකටත් Register කරන්න" checkbox එක check කරලා තියෙනවා නම්
+    if (registerTempAsProduct) {
+      // 🛠️ Duplicate Prevention: මේ නමින්ම Product එකක් Catalog එකේ දැනටමත් තියෙනවද බලයි
+      const existingProduct = products.find(p => p.name.trim().toLowerCase() === tempItemForm.name.trim().toLowerCase());
+      if (existingProduct) {
+        setCart([...cart, {
+          ...existingProduct,
+          cartLineId: `real_${existingProduct._id}_${Date.now()}`,
+          qty,
+          discount: 0,
+          discountPercent: 0,
+          isTemporary: false
+        }]);
+        showToast(`ℹ️ "${existingProduct.name}" කියලා Product එකක් දැනටමත් Catalog එකේ තියෙනවා — ඒකම Bill එකට එකතු කලා (Duplicate නොවී).`, "warning");
+        setTempItemForm({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
+        setRegisterTempAsProduct(false);
+        return;
+      }
+
+      try {
+        const response = await axios.post(`${API_BASE_URL}/products/add`, {
+          name: tempItemForm.name,
+          price,
+          marketPrice: price,
+          costPrice: price * 0.85, // 🛠️ Estimate එකක් - පස්සේ Admin > තොග කළමනාකරණය එකෙන් නිවැරදි කරගන්න
+          stock: qty, // 🛠️ දැනට විකුණන ප්‍රමාණයම Initial Stock එක විදිහට register වේ (Sale එකෙන් පස්සේ 0 වේ)
+          barcode: tempItemForm.barcode || "",
+          unit: tempItemForm.unit,
+          category: "Other", // 🛠️ පස්සේ Admin ට නිවැරදි Category එකක් තෝරගන්න පුළුවන්
+          minStockLevel: 5
+        });
+
+        const newProduct = response.data.product;
+        setCart([...cart, {
+          ...newProduct,
+          cartLineId: `real_${newProduct._id}_${Date.now()}`,
+          qty,
+          discount: 0,
+          discountPercent: 0,
+          isTemporary: false
+        }]);
+        showToast(`✅ "${newProduct.name}" Database එකට Register වුනා සහ Bill එකටත් එකතු කලා! 🗄️`);
+        setTempItemForm({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
+        setRegisterTempAsProduct(false);
+        fetchProducts(); // 🛠️ Products list එකත් Refresh කරයි, අලුත් Product එක Billing Search එකෙන්ම හම්බවෙන්න
+        return;
+      } catch (error) {
+        // 🛠️ Registration එක fail වුනත්, Sale එක නවත්තන්නේ නැතුව Temp Item එකක් විදිහටම Bill එකට එකතු කරයි
+        showToast("⚠️ Database Register කිරීම අසාර්ථක වුනා - Bill එකට තාවකාලිකව එකතු කලා.", "warning");
+      }
     }
 
     const tempProduct = {
       // 🛠️ Unsaved අලුත් අයිටම් එකට Front-end එකෙන් හදන Dynamic ID එකක් ලබාදෙයි
       _id: `temp_${Date.now()}`, 
       name: `${tempItemForm.name}`,
-      price: parseFloat(tempItemForm.price),
-      marketPrice: parseFloat(tempItemForm.price),
-      costPrice: parseFloat(tempItemForm.price) * 0.85, 
-      stock: parseFloat(tempItemForm.qty) + 10, 
+      price,
+      marketPrice: price,
+      costPrice: price * 0.85, 
+      stock: qty + 10, 
       barcode: tempItemForm.barcode || "N/A",
       discount: 0,
       discountPercent: 0,
       unit: tempItemForm.unit,
-      qty: parseFloat(tempItemForm.qty),
+      qty,
       isTemporary: true,
       cartLineId: `temp_${Date.now()}` // 🛠️ Multi-Price cart line identity සමග ගැලපෙන්න
     };
@@ -641,6 +697,7 @@ useEffect(() => {
     setCart([...cart, tempProduct]);
     showToast(`"${tempProduct.name}" තාවකාලිකව බිලට එකතු කලා! 📥`, "warning");
     setTempItemForm({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
+    setRegisterTempAsProduct(false);
   };
 
   // 🛠️ UPDATED (Multi-Price): _id වෙනුවට cartLineId එකෙන් match කරයි (එකම Product එකට Batch දෙකක් cart එකේ තිබ්බොත් හසුරුවගන්න)
@@ -1194,6 +1251,56 @@ useEffect(() => {
     return suggestion > 0 ? suggestion : min;
   };
 
+  // 🆕 UNREGISTERED ITEMS: Emergency Add හරහා Database එකට Register නොකර විකුණපු items,
+  // Sale History එකෙන් (productId නැති items) නම අනුව Group කර, Catalog එකේ දැනටමත් නැති ඒවා විතරක් පෙන්වයි
+  const unregisteredItemGroups = (() => {
+    const groups = {};
+    (salesSummary.sales || []).forEach((sale) => {
+      if (sale.status === "Voided") return;
+      (sale.items || []).forEach((item) => {
+        if (item.productId) return; // දැනටමත් Real Product එකකට Link වෙලා තියෙනවා
+        const key = (item.name || "").trim();
+        if (!key) return;
+        if (!groups[key]) {
+          groups[key] = { name: key, totalQty: 0, totalRevenue: 0, occurrences: 0, lastSoldAt: sale.createdAt };
+        }
+        groups[key].totalQty += parseFloat(item.qty) || 0;
+        groups[key].totalRevenue += (parseFloat(item.price) || 0) * (parseFloat(item.qty) || 0);
+        groups[key].occurrences += 1;
+        if (new Date(sale.createdAt) > new Date(groups[key].lastSoldAt)) groups[key].lastSoldAt = sale.createdAt;
+      });
+    });
+
+    return Object.values(groups)
+      .map((g) => ({ ...g, avgPrice: g.totalQty > 0 ? g.totalRevenue / g.totalQty : 0 }))
+      // 🛠️ Owner කවුරු හරි මෙයාට කලින්ම Product එකක් විදිහට Register කරලා තියෙනවා නම්, list එකෙන් auto-remove වේ
+      .filter((g) => !products.some((p) => p.name.trim().toLowerCase() === g.name.toLowerCase()))
+      .sort((a, b) => b.occurrences - a.occurrences);
+  })();
+
+  // 🆕 Unregistered Item Group එකක්, Add Product Form එකට Pre-fill කර Register කිරීමට
+  const handleRegisterUnregisteredItem = (group) => {
+    setIsEditing(false);
+    setEditId(null);
+    setProductForm({
+      name: group.name,
+      marketPrice: group.avgPrice.toFixed(2),
+      price: group.avgPrice.toFixed(2),
+      costPrice: (group.avgPrice * 0.85).toFixed(2),
+      stock: "0",
+      barcode: "",
+      discountPercent: "",
+      unit: "Kg",
+      category: "Other",
+      minStockLevel: "5",
+      preferredSupplierId: "",
+      expiryDate: "",
+      batches: []
+    });
+    setAdminSubTab("products");
+    showToast(`"${group.name}" විස්තර Form එකට පිරෙව්වා — කරුණාකර සම්පූර්ණ කර Save කරන්න! ✍️`, "warning");
+  };
+
   // 🆕 EXPIRY HELPERS
   const getExpiryStatus = (product) => {
     if (!product.expiryDate) return null;
@@ -1493,7 +1600,7 @@ useEffect(() => {
                         onClick={(e) => e.stopPropagation()}
                       >
                         <button
-                          onClick={() => setShowTempItemModal(false)}
+                          onClick={() => { setShowTempItemModal(false); setRegisterTempAsProduct(false); }}
                           className="absolute top-3 right-3 text-amber-800 hover:text-amber-950 font-black text-lg leading-none"
                         >
                           ✕
@@ -1561,11 +1668,25 @@ useEffect(() => {
                               className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500"
                             />
                           </div>
+
+                          {/* 🆕 Database එකටත් Register කරනවද කියලා තෝරගැනීම */}
+                          <label className="flex items-start gap-2 bg-white/70 border border-amber-300 rounded-lg p-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={registerTempAsProduct}
+                              onChange={(e) => setRegisterTempAsProduct(e.target.checked)}
+                              className="mt-0.5 accent-amber-600"
+                            />
+                            <span className="text-[10px] text-amber-900 font-semibold leading-snug">
+                              🗄️ Add product to Database
+                            </span>
+                          </label>
+
                           <button
                             type="submit"
                             className="w-full bg-amber-600 hover:bg-amber-700 text-white font-black py-2 rounded-lg text-xs transition-all shadow-sm"
                           >
-                            ➕ Add to Bill (Without Database)
+                            {registerTempAsProduct ? "➕ Register කර Bill එකට එකතු කරන්න" : "➕ Add to Bill (Without Database)"}
                           </button>
                         </form>
                       </div>
@@ -1921,6 +2042,12 @@ useEffect(() => {
                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black ${adminSubTab === "expiry" ? "bg-white/20" : "bg-red-500 text-white animate-pulse"}`}>{expiringProducts.length}</span>
                   )}
                 </button>
+                <button onClick={() => setAdminSubTab("unregistered")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "unregistered" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
+                  <span>🆕 Unregistered Items</span>
+                  {unregisteredItemGroups.length > 0 && (
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black ${adminSubTab === "unregistered" ? "bg-white/20" : "bg-amber-500 text-white animate-pulse"}`}>{unregisteredItemGroups.length}</span>
+                  )}
+                </button>
                 <button onClick={() => setAdminSubTab("returns")} className={`p-3 text-left font-bold ${adminSubTab === "returns" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🔄 Return/Exchange ඉතිහාසය</button>
                 <button onClick={() => setAdminSubTab("sales")} className={`p-3 text-left font-bold ${adminSubTab === "sales" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📊 විකුණුම් වාර්තා</button>
               </div>
@@ -2235,6 +2362,53 @@ useEffect(() => {
                                   <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${p.expiryStatus === "expired" ? "bg-red-600 text-white" : "bg-amber-400 text-amber-950"}`}>
                                     {p.expiryStatus === "expired" ? "⛔ කල් ඉකුත් වී ඇත" : "⚠️ ළඟදීම Expire වේ"}
                                   </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 🆕 UNREGISTERED ITEMS Sub-tab (Review Queue) */}
+                {adminSubTab === "unregistered" && (
+                  <div className="space-y-6">
+                    <div className="bg-white p-5 rounded-xl border shadow-xs">
+                      <h3 className="text-sm font-black uppercase text-slate-800 mb-1">🆕 Unregistered Items</h3>
+                      <p className="text-xs text-gray-500">"හදිසි අවස්ථා" එකෙන් Database එකට Register නොකර විකුණපු භාණ්ඩ ලැයිස්තුව — Review කරලා, ඕන ඒවා Catalog එකට Register කරන්න.</p>
+                    </div>
+
+                    {unregisteredItemGroups.length === 0 ? (
+                      <div className="bg-white p-10 rounded-xl border shadow-xs flex flex-col items-center justify-center text-center">
+                        <span className="text-4xl mb-2">✅</span>
+                        <p className="text-sm font-bold text-slate-700">Register කරන්න ඕන Items නැත!</p>
+                        <p className="text-xs text-gray-400 mt-1">Unregistered විදිහට විකුණපු භාණ්ඩයක් තවම නැත</p>
+                      </div>
+                    ) : (
+                      <div className="bg-white rounded-xl border shadow-xs overflow-hidden">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-slate-100 text-slate-700 font-bold border-b">
+                              <th className="p-3">භාණ්ඩයේ නම</th>
+                              <th className="p-3 text-center">මුළු විකුණපු ප්‍රමාණය</th>
+                              <th className="p-3 text-center">කී වතාවක් Sell වුනාද</th>
+                              <th className="p-3 text-right">සාමාන්‍ය මිල</th>
+                              <th className="p-3 text-center">අන්තිමට Sell වුනු දිනය</th>
+                              <th className="p-3 text-center">ක්‍රියාවන්</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100 font-medium">
+                            {unregisteredItemGroups.map((g) => (
+                              <tr key={g.name} className="hover:bg-amber-50/40">
+                                <td className="p-3 font-bold text-slate-900">{g.name}</td>
+                                <td className="p-3 text-center">{g.totalQty}</td>
+                                <td className="p-3 text-center"><span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-black">{g.occurrences}×</span></td>
+                                <td className="p-3 text-right text-gray-600">රු. {g.avgPrice.toFixed(2)}</td>
+                                <td className="p-3 text-center text-gray-500">{new Date(g.lastSoldAt).toLocaleDateString()}</td>
+                                <td className="p-3 text-center">
+                                  <button onClick={() => handleRegisterUnregisteredItem(g)} className="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-[10px] font-bold transition-all">➕ Register as Product</button>
                                 </td>
                               </tr>
                             ))}
