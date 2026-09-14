@@ -262,7 +262,8 @@ useEffect(() => {
         }
       }
       showToast("✅ සියලුම Offline බිල්පත් සාර්ථකව server එකට යැවුවා! 🎉");
-      fetchProducts(); 
+      fetchProducts();
+      if (user.role === "admin") fetchSalesSummary(); 
     };
 
     window.addEventListener('online', handleOnline);
@@ -804,6 +805,7 @@ useEffect(() => {
       showToast("ඉන්වොයිසිය සාර්ථකව මුද්‍රණය කලා! 🖨️✨");
       fetchProducts();
       fetchCustomers();
+      if (user.role === "admin") fetchSalesSummary();
 
     } catch (error) {
       // 📴 OFFLINE: ඉන්ටර්නෙට් නැතිනම් බිල බ්‍රවුසර් එකේ සේව් කරයි
