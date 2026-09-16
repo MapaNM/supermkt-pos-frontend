@@ -131,6 +131,15 @@ function App() {
   const [exchangePaymentMethod, setExchangePaymentMethod] = useState("Cash");
   const [returnLoading, setReturnLoading] = useState(false);
   const [returnHistory, setReturnHistory] = useState([]);
+  // 🆕 Unregistered Items tab එකේ Manually "Delete" කරපු item names ටික - localStorage එකේ persist වේ (Browser/Device එකට Local)
+  const [dismissedUnregisteredItems, setDismissedUnregisteredItems] = useState(() => {
+    try {
+      const saved = localStorage.getItem("smartstore_dismissed_unregistered_items");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
   const [exchangeProductSearch, setExchangeProductSearch] = useState("");
 
   // 🆕 EXPIRY TRACKING State
@@ -141,13 +150,43 @@ function App() {
   const [lastSaleIsOffline, setLastSaleIsOffline] = useState(false);
 
   // Emergency Temp Item Form State (For Any Role)
-  const [tempItemForm, setTempItemForm] = useState({ name: "", price: "", qty: "1", unit: "", barcode: "" });
+  const [tempItemForm, setTempItemForm] = useState({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
   const [registerTempAsProduct, setRegisterTempAsProduct] = useState(false); // 🆕 Emergency item එකත් Database එකට Register කරනවද
 
   const [showTempItemModal, setShowTempItemModal] = useState(false);
 
   // Custom Toast State
   const [toasts, setToasts] = useState([]);
+
+  // 🆕 MODERN CONFIRM/PROMPT DIALOG STATE (replaces native window.confirm / window.prompt)
+  // dialogRequest holds: { title, message, tone, confirmLabel, cancelLabel, requireText, resolve }
+  const [dialogRequest, setDialogRequest] = useState(null);
+  const [dialogTypedText, setDialogTypedText] = useState("");
+
+  // Opens a modern confirmation dialog and resolves to true/false (Promise-based),
+  // so call-sites read just like `if (window.confirm(...))` used to.
+  // Pass { requireText: "DELETE" } for destructive type-to-confirm actions
+  // (replaces the old window.prompt("...DELETE...") pattern).
+  const askConfirm = (options = {}) => {
+    return new Promise((resolve) => {
+      setDialogTypedText("");
+      setDialogRequest({
+        title: options.title || "තහවුරු කරන්න",
+        message: options.message || "",
+        tone: options.tone || "default", // "default" | "danger" | "warning"
+        confirmLabel: options.confirmLabel || "තහවුරු කරන්න",
+        cancelLabel: options.cancelLabel || "අවලංගු කරන්න",
+        requireText: options.requireText || null,
+        resolve,
+      });
+    });
+  };
+
+  const resolveDialog = (result) => {
+    if (dialogRequest?.resolve) dialogRequest.resolve(result);
+    setDialogRequest(null);
+    setDialogTypedText("");
+  };
 
   let barcodeBuffer = "";
   let lastKeyTime = Date.now();
@@ -192,6 +231,28 @@ useEffect(() => {
     window.removeEventListener("keydown", handleEsc);
   };
 }, [showTempItemModal]);
+
+  // 🆕 Modern confirm/prompt dialog: Escape to cancel, Enter to confirm (when not blocked by requireText), scroll lock
+  useEffect(() => {
+    if (!dialogRequest) return;
+
+    const handleKey = (e) => {
+      if (e.key === "Escape") {
+        resolveDialog(false);
+      } else if (e.key === "Enter" && !dialogRequest.requireText) {
+        e.preventDefault();
+        resolveDialog(true);
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKey);
+
+    return () => {
+      document.body.style.overflow = "unset";
+      window.removeEventListener("keydown", handleKey);
+    };
+  }, [dialogRequest]);
 
   // Live Balance Calculation
   useEffect(() => {
@@ -263,7 +324,7 @@ useEffect(() => {
       }
       showToast("✅ සියලුම Offline බිල්පත් සාර්ථකව server එකට යැවුවා! 🎉");
       fetchProducts();
-      if (user.role === "admin") fetchSalesSummary(); 
+      if (user.role === "admin") fetchSalesSummary(); // 🛠️ FIX: Offline sales sync වුනාට පස්සේත් Unregistered Items/Sales Logs Refresh වේ
     };
 
     window.addEventListener('online', handleOnline);
@@ -359,6 +420,24 @@ useEffect(() => {
     } catch (error) { console.error(error); }
   };
 
+  // 🆕 සියලුම Return/Exchange History Permanently Clear කිරීම
+  // ⚠️ Destructive action එකක් - "DELETE" type කරලා confirm කරන්න ඕන
+  const handleClearAllReturns = async () => {
+    const confirmed = await askConfirm({
+      title: "Clear Return/Exchange History!",
+      message: `මෙයින් Return/Exchange ඉතිහාසය (${returnHistory.length} Records) සම්පූර්ණයෙන්ම, ආපහු ලබාගත නොහැකි ලෙස Delete වේ!`,
+      tone: "danger",
+      confirmLabel: "සියල්ල මකන්න",
+      requireText: "DELETE",
+    });
+    if (!confirmed) return;
+    try {
+      const response = await axios.delete(`${API_BASE_URL}/products/returns/clear-all`);
+      showToast(response.data.message || "Return/Exchange ඉතිහාසය Clear කලා! 🧹");
+      fetchReturnHistory();
+    } catch (error) { showToast("Clear කිරීම අසාර්ථකයි!", "error"); }
+  };
+
   // --- CUSTOMER CRUD ---
   const handleCustomerSubmit = async (e) => {
     e.preventDefault();
@@ -386,14 +465,19 @@ useEffect(() => {
   };
 
   const handleDeleteCustomerClick = async (id) => {
-    if (window.confirm("මෙම පාරිභෝගිකයාව මකා දැමීමට අවශ්‍ය බව විශ්වාසද? 🗑️")) {
-      try {
-        // 🛠️ Port 5008 සහ API Base URL එකට ගැළපෙන සේ සකසා ඇත
-        await axios.delete(`${API_BASE_URL}/customers/delete/${id}`);
-        showToast("මකා දැමීම සාර්ථකයි!");
-        fetchCustomers();
-      } catch (error) { showToast("මකා දැමීම අසාර්ථකයි!", "error"); }
-    }
+    const confirmed = await askConfirm({
+      title: "පාරිභෝගිකයා මකන්න",
+      message: "මෙම පාරිභෝගිකයාව මකා දැමීමට අවශ්‍ය බව විශ්වාසද?",
+      tone: "danger",
+      confirmLabel: "මකන්න",
+    });
+    if (!confirmed) return;
+    try {
+      // 🛠️ Port 5008 සහ API Base URL එකට ගැළපෙන සේ සකසා ඇත
+      await axios.delete(`${API_BASE_URL}/customers/delete/${id}`);
+      showToast("මකා දැමීම සාර්ථකයි!");
+      fetchCustomers();
+    } catch (error) { showToast("මකා දැමීම අසාර්ථකයි!", "error"); }
   };
 
   // 🛠️ UPDATED: Dropdown එකෙන් හෝ Enter key එකෙන් පාරිභෝගිකයෙක් තෝරාගැනීම
@@ -467,7 +551,13 @@ useEffect(() => {
   };
 
   const handleDeleteSupplierClick = async (id) => {
-    if (window.confirm("මෙම සැපයුම්කරුව මකා දැමීමට අවශ්‍ය බව විශ්වාසද? 🗑️")) {
+    const confirmed = await askConfirm({
+      title: "සැපයුම්කරුව මකන්න",
+      message: "මෙම සැපයුම්කරුව මකා දැමීමට අවශ්‍ය බව විශ්වාසද?",
+      tone: "danger",
+      confirmLabel: "මකන්න",
+    });
+    if (confirmed) {
       try {
         await axios.delete(`${API_BASE_URL}/suppliers/delete/${id}`);
         showToast("මකා දැමීම සාර්ථකයි!");
@@ -646,21 +736,28 @@ useEffect(() => {
       }
 
       try {
-        const response = await axios.post(`${API_BASE_URL}/products/add`, {
+        const registrationPayload = {
           name: tempItemForm.name,
           price,
           marketPrice: price,
           costPrice: price * 0.85, // 🛠️ Estimate එකක් - පස්සේ Admin > තොග කළමනාකරණය එකෙන් නිවැරදි කරගන්න
           stock: qty, // 🛠️ දැනට විකුණන ප්‍රමාණයම Initial Stock එක විදිහට register වේ (Sale එකෙන් පස්සේ 0 වේ)
-          barcode: tempItemForm.barcode || "",
           unit: tempItemForm.unit,
           category: "Other", // 🛠️ පස්සේ Admin ට නිවැරදි Category එකක් තෝරගන්න පුළුවන්
           minStockLevel: 5
-        });
+        };
+        // 🛠️ FIX: Barcode field එක blank නම් request එකෙන්ම අයින් කරයි (empty string "" එකක් යැව්වොත්,
+        // barcode වල Unique Index එකක් තියෙනවා නම් Duplicate Key Error (E11000) එකක් සමඟ 500 error එකක් එනවා)
+        if (tempItemForm.barcode && tempItemForm.barcode.trim() !== "") {
+          registrationPayload.barcode = tempItemForm.barcode.trim();
+        }
+
+        const response = await axios.post(`${API_BASE_URL}/products/add`, registrationPayload);
 
         const newProduct = response.data.product;
         setCart([...cart, {
           ...newProduct,
+          unit: tempItemForm.unit, // 🛠️ FIX: User තෝරගත්ත Unit එකම (Empty ඇතුලුව) force කරයි - Backend response එක trust නොකර
           cartLineId: `real_${newProduct._id}_${Date.now()}`,
           qty,
           discount: 0,
@@ -674,7 +771,9 @@ useEffect(() => {
         return;
       } catch (error) {
         // 🛠️ Registration එක fail වුනත්, Sale එක නවත්තන්නේ නැතුව Temp Item එකක් විදිහටම Bill එකට එකතු කරයි
-        showToast("⚠️ Database Register කිරීම අසාර්ථක වුනා - Bill එකට තාවකාලිකව එකතු කලා.", "warning");
+        console.error("Product registration failed:", error.response?.data || error.message);
+        const backendMsg = error.response?.data?.message || error.response?.data?.error;
+        showToast(`⚠️ Database Register කිරීම අසාර්ථක වුනා${backendMsg ? ` (${backendMsg})` : ""} - Bill එකට තාවකාලිකව එකතු කලා.`, "warning");
       }
     }
 
@@ -805,6 +904,8 @@ useEffect(() => {
       showToast("ඉන්වොයිසිය සාර්ථකව මුද්‍රණය කලා! 🖨️✨");
       fetchProducts();
       fetchCustomers();
+      // 🛠️ FIX: Checkout එකට පස්සේ Sales Summary එකත් Refresh කරයි - Unregistered Items tab, Sales Logs,
+      // සහ Revenue/Profit stats වගේ දේවල් Page Refresh එකක් නැතුවම Instantly අලුත් වෙනවා
       if (user.role === "admin") fetchSalesSummary();
 
     } catch (error) {
@@ -851,15 +952,39 @@ useEffect(() => {
   };
 
   const handleVoidSale = async (saleId) => {
-    if (window.confirm("මෙම බිල්පත අවලංගු කිරීමට අවශ්‍යද?")) {
-      try {
-        await axios.post(`${API_BASE_URL}/products/void-sale/${saleId}`);
-        showToast("බිල්පත සාර්ථකව අවලංගු කලා!");
-        fetchProducts();
-        fetchSalesSummary();
-        fetchCustomers();
-      } catch (error) { showToast("අසාර්ථකයි!", "error"); }
-    }
+    const confirmed = await askConfirm({
+      title: "බිල්පත අවලංගු කිරීම",
+      message: "මෙම බිල්පත අවලංගු කිරීමට අවශ්‍යද?",
+      tone: "danger",
+      confirmLabel: "අවලංගු කරන්න",
+      cancelLabel: "නවත්වන්න",
+    });
+    if (!confirmed) return;
+    try {
+      await axios.post(`${API_BASE_URL}/products/void-sale/${saleId}`);
+      showToast("බිල්පත සාර්ථකව අවලංගු කලා!");
+      fetchProducts();
+      fetchSalesSummary();
+      fetchCustomers();
+    } catch (error) { showToast("අසාර්ථකයි!", "error"); }
+  };
+
+  // 🆕 සියලුම විකුණුම් ඉතිහාසය (Sales Logs) Permanently Clear කිරීම
+  // ⚠️ Destructive action එකක් නිසා Type-to-Confirm guard එකක් - "DELETE" type කරලා confirm කරන්න ඕන
+  const handleClearAllSales = async () => {
+    const confirmed = await askConfirm({
+      title: "Clear Sales History!",
+      message: `මෙයින් විකුණුම් ඉතිහාසය (${salesSummary.sales?.length || 0} Records) සම්පූර්ණයෙන්ම, ආපහු ලබාගත නොහැකි ලෙස Delete වේ!`,
+      tone: "danger",
+      confirmLabel: "සියල්ල මකන්න",
+      requireText: "DELETE",
+    });
+    if (!confirmed) return;
+    try {
+      const response = await axios.delete(`${API_BASE_URL}/products/sales/clear-all`);
+      showToast(response.data.message || "විකුණුම් ඉතිහාසය Clear කලා! 🧹");
+      fetchSalesSummary();
+    } catch (error) { showToast("Clear කිරීම අසාර්ථකයි!", "error"); }
   };
 
   // --- RETURN / REFUND / EXCHANGE LOGIC ---
@@ -1051,9 +1176,13 @@ useEffect(() => {
       !showNewPriceEntry &&
       !(productForm.batches || []).some(b => parseFloat(b.price) === parseFloat(editingOriginalProduct.price) && parseFloat(b.stock) > 0)
     ) {
-      const proceed = window.confirm(
-        `⚠️ ඔයා මිල රු.${parseFloat(editingOriginalProduct.price).toFixed(2)} ඉඳන් රු.${parseFloat(productForm.price).toFixed(2)} බවට වෙනස් කරනවා.\n\nපරණ මිලේ ඉතුරු තොගය (${editingOriginalProduct.stock}ක්) සම්පූර්ණයෙන්ම මැකිලා අලුත් මිලින්ම replace වේවි (Popup එකක් නැතුව).\n\nපරණ තොගයත් වෙනම විකුණන්න ඕන නම් "Cancel" කරලා 🔄 "නව මිලකට Stock ලැබුනාද?" Button එක Use කරන්න.\n\nඅනිවාර්යෙන්ම මෙහෙම Replace කරන්නද?`
-      );
+      const proceed = await askConfirm({
+        title: "මිල වෙනස් කිරීම තහවුරු කරන්න",
+        message: `ඔයා මිල රු.${parseFloat(editingOriginalProduct.price).toFixed(2)} ඉඳන් රු.${parseFloat(productForm.price).toFixed(2)} බවට වෙනස් කරනවා. පරණ මිලේ ඉතුරු තොගය (${editingOriginalProduct.stock}ක්) සම්පූර්ණයෙන්ම මැකිලා අලුත් මිලින්ම replace වේවි (Popup එකක් නැතුව). පරණ තොගයත් වෙනම විකුණන්න ඕන නම් "Cancel" කරලා 🔄 "නව මිලකට Stock ලැබුනාද?" Button එක Use කරන්න.`,
+        tone: "warning",
+        confirmLabel: "ඔව්, Replace කරන්න",
+        cancelLabel: "Cancel",
+      });
       if (!proceed) return;
     }
 
@@ -1190,13 +1319,18 @@ useEffect(() => {
   };
 
   const handleDeleteClick = async (id) => {
-    if (window.confirm("මෙම භාණ්ඩය මකා දැමීමට අවශ්‍ය බව විශ්වාසද? 🗑️")) {
-      try {
-        await axios.delete(`${API_BASE_URL}/products/delete/${id}`);
-        showToast("භාණ්ඩය සාර්ථකව මකා දැමුවා.");
-        fetchProducts();
-      } catch (error) { showToast("මකා දැමීම අසාර්ථකයි!", "error"); }
-    }
+    const confirmed = await askConfirm({
+      title: "භාණ්ඩය මකන්න",
+      message: "මෙම භාණ්ඩය මකා දැමීමට අවශ්‍ය බව විශ්වාසද?",
+      tone: "danger",
+      confirmLabel: "මකන්න",
+    });
+    if (!confirmed) return;
+    try {
+      await axios.delete(`${API_BASE_URL}/products/delete/${id}`);
+      showToast("භාණ්ඩය සාර්ථකව මකා දැමුවා.");
+      fetchProducts();
+    } catch (error) { showToast("මකා දැමීම අසාර්ථකයි!", "error"); }
   };
 
  const filteredBillingProducts = products
@@ -1277,8 +1411,35 @@ useEffect(() => {
       .map((g) => ({ ...g, avgPrice: g.totalQty > 0 ? g.totalRevenue / g.totalQty : 0 }))
       // 🛠️ Owner කවුරු හරි මෙයාට කලින්ම Product එකක් විදිහට Register කරලා තියෙනවා නම්, list එකෙන් auto-remove වේ
       .filter((g) => !products.some((p) => p.name.trim().toLowerCase() === g.name.toLowerCase()))
+      // 🆕 Manually "Delete" කරපු items ටිකත් list එකෙන් අයින් කරයි
+      .filter((g) => !dismissedUnregisteredItems.includes(g.name.toLowerCase()))
       .sort((a, b) => b.occurrences - a.occurrences);
   })();
+
+  // 🆕 Unregistered Item Group එකක් Manually Delete කිරීම (Product එකක් විදිහට Register නොකර, list එකෙන් විතරක් ඉවත් කිරීම)
+  const handleDismissUnregisteredItem = (name) => {
+    const updated = [...dismissedUnregisteredItems, name.toLowerCase()];
+    setDismissedUnregisteredItems(updated);
+    localStorage.setItem("smartstore_dismissed_unregistered_items", JSON.stringify(updated));
+    showToast(`"${name}" ලැයිස්තුවෙන් ඉවත් කලා 🗑️`);
+  };
+
+  // 🆕 Unregistered Items ලැයිස්තුවේ දැනට පෙන්වන ඒවා ඔක්කොම එකවර ඉවත් කිරීම
+  const handleClearAllUnregisteredItems = async () => {
+    if (unregisteredItemGroups.length === 0) return;
+    const confirmed = await askConfirm({
+      title: "ලැයිස්තුව සම්පූර්ණයෙන් ඉවත් කිරීම",
+      message: `Unregistered Items ලැයිස්තුවේ ඇති ${unregisteredItemGroups.length} items ම ඉවත් කිරීමට අවශ්‍යද? (මේකෙන් Sale History එකට කිසිම බලපෑමක් නැත - මේ Review List එකෙන් විතරයි ඉවත් වන්නේ)`,
+      tone: "warning",
+      confirmLabel: "ඉවත් කරන්න",
+    });
+    if (!confirmed) return;
+    const namesToAdd = unregisteredItemGroups.map((g) => g.name.toLowerCase());
+    const updated = [...new Set([...dismissedUnregisteredItems, ...namesToAdd])];
+    setDismissedUnregisteredItems(updated);
+    localStorage.setItem("smartstore_dismissed_unregistered_items", JSON.stringify(updated));
+    showToast("Unregistered Items ලැයිස්තුව සම්පූර්ණයෙන් Clear කලා! 🧹");
+  };
 
   // 🆕 Unregistered Item Group එකක්, Add Product Form එකට Pre-fill කර Register කිරීමට
   const handleRegisterUnregisteredItem = (group) => {
@@ -1346,6 +1507,86 @@ useEffect(() => {
           </div>
         ))}
       </div>
+
+      {/* 🆕 MODERN CONFIRM / PROMPT DIALOG (replaces native window.confirm / window.prompt) */}
+      {dialogRequest && (
+        <div
+          className="fixed inset-0 z-100 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm print:hidden"
+          onClick={() => resolveDialog(false)}
+        >
+          <div
+            className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-[fadeIn_0.15s_ease-out]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div
+              className={`px-5 py-4 flex items-start gap-3 ${
+                dialogRequest.tone === "danger"
+                  ? "bg-linear-to-r from-red-600 to-rose-600"
+                  : dialogRequest.tone === "warning"
+                  ? "bg-linear-to-r from-amber-500 to-orange-500"
+                  : "bg-linear-to-r from-slate-800 to-slate-900"
+              }`}
+            >
+              <div className="w-9 h-9 shrink-0 rounded-full bg-white/15 flex items-center justify-center text-lg">
+                {dialogRequest.tone === "danger" ? "🗑️" : dialogRequest.tone === "warning" ? "⚠️" : "❓"}
+              </div>
+              <div className="pt-0.5">
+                <h3 className="text-sm font-black text-white leading-tight">{dialogRequest.title}</h3>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div className="px-5 py-4">
+              <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-line">{dialogRequest.message}</p>
+
+              {dialogRequest.requireText && (
+                <div className="mt-4">
+                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-1.5">
+                    තහවුරු කිරීමට "{dialogRequest.requireText}" ලෙස ටයිප් කරන්න
+                  </label>
+                  <input
+                    type="text"
+                    autoFocus
+                    value={dialogTypedText}
+                    onChange={(e) => setDialogTypedText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && dialogTypedText === dialogRequest.requireText) {
+                        resolveDialog(true);
+                      }
+                    }}
+                    placeholder={dialogRequest.requireText}
+                    className="w-full px-3 py-2 rounded-lg border-2 border-slate-300 focus:border-red-500 focus:outline-none text-sm font-mono tracking-wider"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div className="px-5 pb-5 flex gap-2 justify-end">
+              <button
+                onClick={() => resolveDialog(false)}
+                className="px-4 py-2 rounded-lg text-sm font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors"
+              >
+                {dialogRequest.cancelLabel}
+              </button>
+              <button
+                onClick={() => resolveDialog(true)}
+                disabled={dialogRequest.requireText ? dialogTypedText !== dialogRequest.requireText : false}
+                className={`px-4 py-2 rounded-lg text-sm font-black text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                  dialogRequest.tone === "danger"
+                    ? "bg-red-600 hover:bg-red-700"
+                    : dialogRequest.tone === "warning"
+                    ? "bg-amber-500 hover:bg-amber-600 text-slate-900"
+                    : "bg-slate-900 hover:bg-slate-800"
+                }`}
+              >
+                {dialogRequest.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 🆕 MULTI-PRICE POPUP: භාණ්ඩයට Old/New Price Batches කිහිපයක් තියෙනවනම්, Scan/Search කරද්දී මිල තෝරගන්න */}
       {multiPricePopup && (
@@ -1680,7 +1921,7 @@ useEffect(() => {
                               className="mt-0.5 accent-amber-600"
                             />
                             <span className="text-[10px] text-amber-900 font-semibold leading-snug">
-                              🗄️ Add product to Database
+                              🗄️ Add Product to Database
                             </span>
                           </label>
 
@@ -2377,9 +2618,14 @@ useEffect(() => {
                 {/* 🆕 UNREGISTERED ITEMS Sub-tab (Review Queue) */}
                 {adminSubTab === "unregistered" && (
                   <div className="space-y-6">
-                    <div className="bg-white p-5 rounded-xl border shadow-xs">
-                      <h3 className="text-sm font-black uppercase text-slate-800 mb-1">🆕 Unregistered Items</h3>
-                      <p className="text-xs text-gray-500">"හදිසි අවස්ථා" එකෙන් Database එකට Register නොකර විකුණපු භාණ්ඩ ලැයිස්තුව — Review කරලා, ඕන ඒවා Catalog එකට Register කරන්න.</p>
+                    <div className="bg-white p-5 rounded-xl border shadow-xs flex justify-between items-start gap-4">
+                      <div>
+                        <h3 className="text-sm font-black uppercase text-slate-800 mb-1">🆕 Unregistered Items</h3>
+                        <p className="text-xs text-gray-500">"හදිසි අවස්ථා" එකෙන් Database එකට Register නොකර විකුණපු භාණ්ඩ ලැයිස්තුව — Review කරලා, ඕන ඒවා Catalog එකට Register කරන්න.</p>
+                      </div>
+                      {unregisteredItemGroups.length > 0 && (
+                        <button onClick={handleClearAllUnregisteredItems} className="bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 px-3 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all">🧹 සියල්ල ඉවත් කරන්න</button>
+                      )}
                     </div>
 
                     {unregisteredItemGroups.length === 0 ? (
@@ -2409,8 +2655,9 @@ useEffect(() => {
                                 <td className="p-3 text-center"><span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-black">{g.occurrences}×</span></td>
                                 <td className="p-3 text-right text-gray-600">රු. {g.avgPrice.toFixed(2)}</td>
                                 <td className="p-3 text-center text-gray-500">{new Date(g.lastSoldAt).toLocaleDateString()}</td>
-                                <td className="p-3 text-center">
-                                  <button onClick={() => handleRegisterUnregisteredItem(g)} className="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-[10px] font-bold transition-all">➕ Register as Product</button>
+                                <td className="p-3 text-center space-x-1.5 whitespace-nowrap">
+                                  <button onClick={() => handleRegisterUnregisteredItem(g)} className="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-[10px] font-bold transition-all">➕ Register</button>
+                                  <button onClick={() => handleDismissUnregisteredItem(g.name)} className="bg-red-100 hover:bg-red-600 text-red-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all">🗑️ Delete</button>
                                 </td>
                               </tr>
                             ))}
@@ -2424,9 +2671,14 @@ useEffect(() => {
                 {/* 🆕 RETURN / EXCHANGE HISTORY Sub-tab */}
                 {adminSubTab === "returns" && (
                   <div className="space-y-6">
-                    <div className="bg-white p-5 rounded-xl border shadow-xs">
-                      <h3 className="text-sm font-black uppercase text-slate-800 mb-1">🔄 Return / Exchange History</h3>
-                      <p className="text-xs text-gray-500">සිදු කරන ලද සියලුම Return, Refund සහ Exchange transactions</p>
+                    <div className="bg-white p-5 rounded-xl border shadow-xs flex justify-between items-start gap-4">
+                      <div>
+                        <h3 className="text-sm font-black uppercase text-slate-800 mb-1">🔄 Return / Exchange History</h3>
+                        <p className="text-xs text-gray-500">සිදු කරන ලද සියලුම Return, Refund සහ Exchange transactions</p>
+                      </div>
+                      {returnHistory.length > 0 && (
+                        <button onClick={handleClearAllReturns} className="bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 px-3 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all">🧹 සියල්ල ඉවත් කරන්න</button>
+                      )}
                     </div>
 
                     {returnHistory.length === 0 ? (
@@ -2879,7 +3131,12 @@ useEffect(() => {
 
                     {/* Sales History Log Table */}
                     <div className="bg-white rounded-xl border shadow-xs overflow-hidden">
-                      <div className="p-4 border-b bg-gray-50"><h3 className="text-xs font-black uppercase text-slate-800">📊 දිනපතා සිදුකල විකුණුම් ඉතිහාසය (Sales Logs)</h3></div>
+                      <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
+                        <h3 className="text-xs font-black uppercase text-slate-800">📊 දිනපතා සිදුකල විකුණුම් ඉතිහාසය (Sales Logs)</h3>
+                        {salesSummary.sales?.length > 0 && (
+                          <button onClick={handleClearAllSales} className="bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 px-3 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all">🧹 සියල්ල ඉවත් කරන්න</button>
+                        )}
+                      </div>
                       <table className="w-full text-left border-collapse text-xs">
                         <thead>
                           <tr className="bg-slate-100 text-slate-700 font-bold border-b">
