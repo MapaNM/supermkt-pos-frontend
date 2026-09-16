@@ -809,6 +809,22 @@ useEffect(() => {
     setCart(newCart);
   };
 
+  // 🆕 GRAM-MODE INPUT: User ග්‍රෑම් වලින් (500, 250 ආදී Whole Numbers) type කරයි - Storage එකට Kg බවට convert කරයි
+  const updateCartQtyDirectlyInGrams = (lineId, gramsValue) => {
+    const newCart = cart.map((item) => {
+      if (item.cartLineId !== lineId) return item;
+      if (gramsValue === "") return { ...item, qty: "" };
+      const grams = parseFloat(gramsValue);
+      return { ...item, qty: isNaN(grams) ? item.qty : grams / 1000 };
+    });
+    setCart(newCart);
+  };
+
+  // 🆕 Cart Line එකක Manual Quantity Input එක Kg / g Mode දෙකට Toggle කිරීම
+  const toggleQtyInputUnit = (lineId, mode) => {
+    setCart(cart.map((item) => (item.cartLineId === lineId ? { ...item, qtyInputUnit: mode } : item)));
+  };
+
   const updateQty = (lineId, amount) => {
     const newCart = cart.map((item) => {
       if (item.cartLineId === lineId) {
@@ -1681,6 +1697,11 @@ useEffect(() => {
                           const discP = parseFloat(item.discountPercent || item.discount) || 0;
                           const originalP = parseFloat(item.price);
                           const finalP = originalP - (originalP * discP) / 100;
+                          // 🆕 GRAM-MODE: "Kg" unit තියෙන items වලට විතරක්, Cashier ට g/Kg entry toggle කරන්න පුළුවන්
+                          const isGramMode = item.unit === "Kg" && item.qtyInputUnit === "g";
+                          const displayQty = isGramMode
+                            ? (item.qty === "" ? "" : Math.round(parseFloat(item.qty || 0) * 1000))
+                            : item.qty;
                           return (
                             <div key={item.cartLineId || item._id} className={`flex items-center justify-between p-3 rounded-xl border shadow-sm hover:bg-slate-100 transition-all ${item.isTemporary ? 'bg-amber-50/70 border-amber-300' : 'bg-slate-50 border-slate-200'}`}>
                               <div className="w-1/3">
@@ -1696,14 +1717,33 @@ useEffect(() => {
                                 {item.unit === "Kg" && <button onClick={() => updateQty(item.cartLineId, -0.1)} className="bg-slate-100 hover:bg-slate-200 px-1 py-1 rounded text-[10px] text-gray-600">-100g</button>}
                                 <input 
                                   type="number" 
-                                  step="0.001"
-                                  value={item.qty} 
-                                  onChange={(e) => updateCartQtyDirectly(item.cartLineId, e.target.value)}
+                                  step={isGramMode ? "1" : "0.001"}
+                                  value={displayQty} 
+                                  onChange={(e) => isGramMode ? updateCartQtyDirectlyInGrams(item.cartLineId, e.target.value) : updateCartQtyDirectly(item.cartLineId, e.target.value)}
                                   className="w-16 text-center font-black text-sm text-blue-700 focus:outline-none" 
                                 />
                                 {item.unit === "Kg" && <button onClick={() => updateQty(item.cartLineId, 0.1)} className="bg-slate-100 hover:bg-slate-200 px-1 py-1 rounded text-[10px] text-gray-600">+100g</button>}
                                 <button onClick={() => updateQty(item.cartLineId, 1)} className="bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded font-bold text-xs">+1</button>
-                                <span className="text-xs text-gray-500 font-bold px-1">{item.unit ?? "Kg"}</span>
+                                {item.unit === "Kg" ? (
+                                  <div className="flex rounded-md overflow-hidden border border-slate-300 ml-0.5 shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleQtyInputUnit(item.cartLineId, "Kg")}
+                                      className={`px-1.5 py-1 text-[10px] font-bold transition-all ${!isGramMode ? "bg-blue-600 text-white" : "bg-white text-gray-500 hover:bg-gray-100"}`}
+                                    >
+                                      Kg
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleQtyInputUnit(item.cartLineId, "g")}
+                                      className={`px-1.5 py-1 text-[10px] font-bold transition-all ${isGramMode ? "bg-blue-600 text-white" : "bg-white text-gray-500 hover:bg-gray-100"}`}
+                                    >
+                                      g
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-gray-500 font-bold px-1">{item.unit ?? "Kg"}</span>
+                                )}
                               </div>
 
                               <div className="text-right w-1/4">
