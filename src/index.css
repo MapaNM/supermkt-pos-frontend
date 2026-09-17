@@ -1,28 +1,125 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=Noto+Sans+Sinhala:wght@400;500;600;700&display=swap');
 
-/* ප්‍රින්ට් කරද්දී ක්‍රියාත්මක වන Styles */
+/* ══════════════════════════════════════════════════════════════
+   SmartStore POS — design tokens
+   ══════════════════════════════════════════════════════════════ */
+
+@theme {
+  --font-sans: "Archivo", "Noto Sans Sinhala", "Segoe UI", system-ui, sans-serif;
+
+  /* numeric weights, so font-600 / font-800 read as weights in the markup */
+  --font-weight-400: 400;
+  --font-weight-500: 500;
+  --font-weight-600: 600;
+  --font-weight-700: 700;
+  --font-weight-800: 800;
+
+  /* work surfaces */
+  --color-paper:    #EEF1F4;
+  --color-card:     #FFFFFF;
+  --color-sunken:   #F5F7F9;
+  --color-line:     #DCE2E8;
+  --color-hairline: #E9EDF1;
+
+  /* text */
+  --color-body:  #17202A;
+  --color-muted: #5C6B7A;
+  --color-faint: #8A98A6;
+
+  /* chrome */
+  --color-ink:  #0F1720;
+  --color-ink2: #1B2733;
+  --color-ink3: #2A3947;
+
+  /* one accent: deep sea green = confirm / money */
+  --color-accent:      #0B6B5B;
+  --color-accent-hi:   #0E8871;
+  --color-accent-soft: #E2F0EC;
+
+  /* semantics, used sparingly */
+  --color-gold:         #9A6B0C;
+  --color-gold-soft:    #FBF1DC;
+  --color-crimson:      #A82C27;
+  --color-crimson-soft: #FAE8E7;
+  --color-plum:         #6B4A9C;
+  --color-plum-soft:    #EFE9F7;
+}
+
+/* Optional: a night shift at the counter.
+   Set <html data-theme="dark"> to switch. Remove this block for light only. */
+:root[data-theme="dark"] {
+  --color-paper:        #131A21;
+  --color-card:         #1B242D;
+  --color-sunken:       #222D37;
+  --color-line:         #2E3B47;
+  --color-hairline:     #26313B;
+  --color-body:         #E6EBF0;
+  --color-muted:        #9BAAB8;
+  --color-faint:        #798896;
+  --color-accent-soft:  #123A33;
+  --color-gold-soft:    #362B12;
+  --color-crimson-soft: #3A1E1D;
+  --color-plum-soft:    #2C2340;
+}
+
+/* Currency and quantity columns align on the decimal */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Quiet scrollbars — a till shouldn't show chrome it doesn't need */
+.scroll { scrollbar-width: thin; scrollbar-color: var(--color-line) transparent; }
+.scroll::-webkit-scrollbar { width: 9px; height: 9px; }
+.scroll::-webkit-scrollbar-thumb { background: var(--color-line); border-radius: 99px; }
+.scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* Number inputs: kill the spinners, they steal touch targets */
+input[type=number]::-webkit-outer-spin-button,
+input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+
+:focus-visible { outline: 2px solid var(--color-accent-hi); outline-offset: 2px; }
+
+/* The one piece of motion: a panel answering the cashier's action */
+@keyframes posRise { from { transform: translateY(14px); opacity: 0 } to { transform: none; opacity: 1 } }
+@keyframes posFade { from { opacity: 0 } to { opacity: 1 } }
+.rise { animation: posRise .16s cubic-bezier(.2,.8,.3,1) both; }
+.fade { animation: posFade .12s ease-out both; }
+@media (prefers-reduced-motion: reduce) { .rise, .fade { animation: none; } }
+
+
+/* ══════════════════════════════════════════════════════════════
+   ප්‍රින්ට් කරද්දී ක්‍රියාත්මක වන Styles
+   ══════════════════════════════════════════════════════════════ */
+
 @media print {
-  body {
-    background-color: white;
-    color: black;
+  html, body {
+    height: auto !important;
+    overflow: visible !important;
+    background-color: white !important;
+    color: black !important;
   }
+
+  /* Thermal paper: force the receipt to plain black on white even if the
+     counter screen is running the dark theme */
+  :root, :root[data-theme="dark"] {
+    --color-body:  #000000;
+    --color-muted: #000000;
+    --color-faint: #000000;
+    --color-card:  #FFFFFF;
+    --color-paper: #FFFFFF;
+    --color-line:  #000000;
+  }
+
   .print\:hidden {
     display: none !important; /* මුළු UI එකම හංගයි */
   }
   .print\:block {
     display: block !important; /* බිල්පත පමණක් පෙන්වයි */
   }
-}
 
-@media print {
-  html, body {
-    height: auto !important;
-    overflow: visible !important;
-  }
-  .print\:hidden {
-    display: none !important;
-  }
-  .print\:block {
-    display: block !important;
-  }
+  /* Don't animate anything on paper */
+  .rise, .fade { animation: none !important; }
 }
