@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { flushSync } from "react-dom";
 import axios from "axios";
 import { db } from "./db";
@@ -109,6 +109,17 @@ function App() {
   });
   const [loginForm, setLoginForm] = useState({ username: "", password: "" });
   const [loginError, setLoginError] = useState("");
+
+  // 🆕 Billing redesign: declared here (not lower down) because the barcode-scanner
+  // useEffect above references showTender, and hooks run top-to-bottom each render —
+  // a const declared later would be read before initialization otherwise.
+  const [showTender, setShowTender] = useState(false);       // payment moved out of the footer
+  const [catalogOpen, setCatalogOpen] = useState(true);      // F8 collapses it for scanner-only work
+  const [catalogSearch, setCatalogSearch] = useState("");    // separate from the scan bar
+  const [billingHighlightIndex, setBillingHighlightIndex] = useState(-1); // 🛠️ FIX: keyboard nav for the scan-bar suggestions dropdown
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const billingSearchRef = useRef(null);
+  const cartScrollRef = useRef(null);
 
   // Product CRUD States
   const [isEditing, setIsEditing] = useState(false);
@@ -336,6 +347,7 @@ useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.target.tagName === "INPUT") return;
       if (activeTab !== "billing" || !user) return;
+      if (showTender) return;
       const currentTime = Date.now();
       if (currentTime - lastKeyTime > 100) barcodeBuffer = "";
       lastKeyTime = currentTime;
@@ -357,7 +369,7 @@ useEffect(() => {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [products, cart, activeTab, user]);
+  }, [products, cart, activeTab, user, showTender]);
 
   const fetchProducts = async () => {
   try {
@@ -965,6 +977,8 @@ useEffect(() => {
     setAmountPaid(""); 
     setBalanceAmount(0);
     setPaymentMethod("Cash");
+    setShowTender(false);
+    setCatalogSearch("");
   };
 
   const handleVoidSale = async (saleId) => {
@@ -1379,6 +1393,128 @@ useEffect(() => {
     return counts;
   }, {});
 
+  /* ═══════════════════════════════════════════════════════════
+     BILLING SCREEN — derived values and keyboard control
+     (state + refs declared near the top of the component, above)
+     ═══════════════════════════════════════════════════════════ */
+
+  // Totals, split so the footer can show what the discounts saved
+  const billSubtotal = cart.reduce(
+    (sum, i) => sum + (parseFloat(i.price) || 0) * (parseFloat(i.qty) || 0), 0
+  );
+  const billDiscount = billSubtotal - calculateTotal();
+
+  // The catalog grid filters on its own field, not on the scan bar
+  const catalogProducts = products
+    .filter(p => {
+      const q = catalogSearch.trim().toLowerCase();
+      const matchesSearch = !q || p.name.toLowerCase().includes(q) || (p.barcode && p.barcode.includes(q));
+      const matchesCategory = billingCategoryFilter === "All" || (p.category || "Grocery") === billingCategoryFilter;
+      return matchesSearch && matchesCategory;
+    })
+    .sort((a, b) => {
+      const q = catalogSearch.trim().toLowerCase();
+      const aStarts = a.name.toLowerCase().startsWith(q);
+      const bStarts = b.name.toLowerCase().startsWith(q);
+      if (aStarts && !bStarts) return -1;
+      if (!aStarts && bStarts) return 1;
+      return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+    });
+
+  // 🛠️ FIX: scan bar now shows a dropdown of ALL matches (filteredBillingProducts), not just one.
+  // Arrow keys move the highlight, Enter picks the highlighted row (or falls back to barcode / best match).
+  const handleBillingSearchKeyDown = (e) => {
+    const matches = filteredBillingProducts;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (matches.length === 0) return;
+      setBillingHighlightIndex((i) => (i + 1) % matches.length);
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (matches.length === 0) return;
+      setBillingHighlightIndex((i) => (i <= 0 ? matches.length - 1 : i - 1));
+      return;
+    }
+    if (e.key === "Escape") {
+      setBillingHighlightIndex(-1);
+      return; // let the existing global Escape handler still run
+    }
+    if (e.key !== "Enter") return;
+
+    const q = billingSearch.trim();
+    if (!q) return;
+
+    const byBarcode = products.find(p => p.barcode && p.barcode === q);
+    // Prefer whatever row is currently highlighted in the dropdown; otherwise fall back
+    // to the best (first) match from the SAME sorted/filtered list the dropdown shows,
+    // so what the cashier sees and what Enter adds are always the same item.
+    const highlighted = billingHighlightIndex >= 0 ? matches[billingHighlightIndex] : null;
+    const hit = byBarcode || highlighted || matches[0];
+
+    if (hit) {
+      addToCart(hit);
+      setBillingSearch("");
+      setBillingHighlightIndex(-1);
+    } else {
+      setTempItemForm(prev => ({ ...prev, barcode: q }));
+      showToast(`⚠️ "${q}" පද්ධතියේ නැත! තාවකාලිකව ඇතුලත් කරන්න.`, "warning");
+    }
+  };
+
+  // Keep the newest line in view as the bill grows
+  useEffect(() => {
+    if (cartScrollRef.current) cartScrollRef.current.scrollTop = cartScrollRef.current.scrollHeight;
+  }, [cart.length]);
+
+  // Online / offline indicator in the top rail
+  useEffect(() => {
+    const on = () => setIsOnline(true);
+    const off = () => setIsOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
+
+  // The whole till without a mouse
+  useEffect(() => {
+    if (!user || activeTab !== "billing") return;
+
+    const onKey = (e) => {
+      if (e.key === "F2") {
+        e.preventDefault();
+        billingSearchRef.current?.focus();
+        billingSearchRef.current?.select();
+      } else if (e.key === "F4") {
+        e.preventDefault();
+        setShowTempItemModal(true);
+      } else if (e.key === "F8") {
+        e.preventDefault();
+        setCatalogOpen(o => !o);
+      } else if (e.key === "F12") {
+        e.preventDefault();
+        if (showTender) handleCheckoutAndPrint();
+        else if (cart.length > 0) setShowTender(true);
+      } else if (e.key === "Escape") {
+        if (showTender) setShowTender(false);
+        else if (!showTempItemModal && !multiPricePopup) billingSearchRef.current?.focus();
+      }
+    };
+
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [user, activeTab, showTender, showTempItemModal, multiPricePopup, cart, paymentMethod, cashReceived, amountPaid, selectedCustomer]);
+
+  // Land on the scan bar whenever the cashier comes back to billing
+  useEffect(() => {
+    if (activeTab === "billing" && !showTender) {
+      const t = setTimeout(() => billingSearchRef.current?.focus(), 60);
+      return () => clearTimeout(t);
+    }
+  }, [activeTab, showTender]);
+
   const filteredAdminProducts = products.filter(p => 
     p.name.toLowerCase().includes(adminProductSearch.toLowerCase()) || 
     (p.barcode && p.barcode.includes(adminProductSearch))
@@ -1493,14 +1629,35 @@ useEffect(() => {
 
   if (!user) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gray-200">
-        <div className="bg-white p-8 rounded-2xl shadow-xl w-96 border">
-          <h2 className="text-2xl font-bold text-center text-blue-600 mb-6">POS System Login 🔑</h2>
-          <form onSubmit={handleLogin} className="space-y-4">
-            <input type="text" placeholder="Username" required value={loginForm.username} onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })} className="w-full p-2 border rounded" />
-            <input type="password" placeholder="Password" required value={loginForm.password} onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })} className="w-full p-2 border rounded" />
-            {loginError && <p className="text-xs text-red-500 font-bold">{loginError}</p>}
-            <button type="submit" className="w-full bg-blue-600 text-white p-2 rounded font-bold">Login</button>
+      <div className="flex items-center justify-center h-screen bg-ink font-sans antialiased px-4">
+        <div className="w-full max-w-90">
+          <div className="flex items-center gap-2.5 mb-6">
+            <div className="w-9 h-9 rounded-lg bg-accent grid place-items-center text-[18px] font-800 text-white">S</div>
+            <div>
+              <h1 className="text-[19px] font-700 text-white tracking-tight leading-none">SmartStore</h1>
+              <p className="text-[12px] text-white/45 mt-1">Sign in to open the till</p>
+            </div>
+          </div>
+
+          <form onSubmit={handleLogin} className="bg-card rounded-2xl border border-line p-5 space-y-2.5">
+            <input
+              type="text" placeholder="Username" required autoFocus
+              value={loginForm.username}
+              onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
+              className="w-full h-11 px-3.5 rounded-xl bg-sunken border border-line focus:border-accent focus:bg-card focus:outline-none text-[14px] font-500 transition-colors"
+            />
+            <input
+              type="password" placeholder="Password" required
+              value={loginForm.password}
+              onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+              className="w-full h-11 px-3.5 rounded-xl bg-sunken border border-line focus:border-accent focus:bg-card focus:outline-none text-[14px] font-500 transition-colors"
+            />
+            {loginError && (
+              <p className="text-[12px] font-600 text-crimson bg-crimson-soft border border-crimson/20 rounded-lg px-3 py-2">{loginError}</p>
+            )}
+            <button type="submit" className="w-full h-11 rounded-xl bg-accent hover:bg-accent-hi text-white text-[14px] font-700 transition-colors">
+              Sign in
+            </button>
           </form>
         </div>
       </div>
@@ -1508,15 +1665,15 @@ useEffect(() => {
   }
 
   return (
-    <div className="flex flex-col h-screen bg-gray-100 font-sans antialiased text-gray-800 relative">
+    <div className="flex flex-col h-screen bg-paper font-sans antialiased text-body relative">
       
       {/* CUSTOM TOAST CONTAINER WINDOW */}
       <div className="fixed top-4 right-4 z-50 space-y-2 pointer-events-none print:hidden max-w-sm w-full">
         {toasts.map((toast) => (
-          <div key={toast.id} className={`p-4 rounded-xl shadow-2xl border flex items-center gap-3 text-sm font-bold text-white transition-all transform animate-bounce duration-300 ${
-            toast.type === "error" ? "bg-red-600 border-red-700" :
-            toast.type === "warning" ? "bg-amber-500 border-amber-600 text-slate-900" :
-            "bg-slate-900 border-slate-950 text-emerald-400"
+          <div key={toast.id} className={`fade px-4 py-2.5 rounded-xl shadow-lg border flex items-center gap-3 text-[13px] font-600 text-white transition-all ${
+            toast.type === "error" ? "bg-crimson border-crimson" :
+            toast.type === "warning" ? "bg-gold border-gold" :
+            "bg-ink border-ink"
           }`}>
             <span>{toast.type === "error" ? "🛑" : toast.type === "warning" ? "⚠️" : "✨"}</span>
             <div className="flex-1">{toast.message}</div>
@@ -1604,466 +1761,668 @@ useEffect(() => {
         </div>
       )}
 
-      {/* 🆕 MULTI-PRICE POPUP: භාණ්ඩයට Old/New Price Batches කිහිපයක් තියෙනවනම්, Scan/Search කරද්දී මිල තෝරගන්න */}
+      {/* ══════════ PRICE PICKER — which price is printed on the pack ══════════ */}
       {multiPricePopup && (
-        <div
-          className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 print:hidden"
-          onClick={() => setMultiPricePopup(null)}
-        >
-          <div
-            className="bg-white rounded-2xl shadow-2xl w-full max-w-md relative overflow-hidden border border-slate-200"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="bg-slate-900 text-white p-4 flex justify-between items-start">
-              <div>
-                <h3 className="text-sm font-black flex items-center gap-1.5">💰 මිල තෝරන්න (Select Price)</h3>
-                <p className="text-xs text-gray-300 mt-1 truncate">{multiPricePopup.name}</p>
+        <div className="fixed inset-0 z-50 fade print:hidden">
+          <div className="absolute inset-0 bg-ink/65 backdrop-blur-[2px]" onClick={() => setMultiPricePopup(null)}></div>
+          <div className="absolute inset-0 flex items-center justify-center p-4">
+            <div className="rise w-full max-w-105 bg-card rounded-2xl border border-line shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+              <div className="px-5 py-3 border-b border-hairline flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h3 className="text-[15px] font-700 text-body">Which price is printed on the pack?</h3>
+                  <p className="text-[12.5px] text-muted mt-0.5 truncate">{multiPricePopup.name}</p>
+                </div>
+                <button onClick={() => setMultiPricePopup(null)} className="h-8 px-3 shrink-0 rounded-lg text-[12.5px] font-600 text-muted hover:bg-sunken transition-colors">Esc</button>
               </div>
-              <button onClick={() => setMultiPricePopup(null)} className="text-gray-300 hover:text-white font-black text-lg leading-none shrink-0 ml-2">✕</button>
-            </div>
 
-            <div className="p-4 space-y-2.5">
-              {/* <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5 font-semibold leading-snug">
-                ⚠️ පාරිභෝගිකයා අත ඇති පැකැට්ටුවේ මුද්‍රිත මිල (MRP) පරීක්ෂා කර, එයට ගැලපෙන මිල පහතින් තෝරන්න.
-              </p> */}
-
-              {(() => {
-                const activeBatches = getActivePriceBatches(multiPricePopup);
-                return activeBatches.map((batch, index) => (
-                  <button
-                    key={batch.batchId || index}
-                    onClick={() => addToCart(multiPricePopup, batch)}
-                    className="w-full flex justify-between items-center p-3.5 rounded-xl border-2 border-slate-200 hover:border-blue-500 hover:bg-blue-50 transition-all text-left active:scale-[0.98]"
-                  >
-                    <div>
-                      <span className="block text-[10px] font-black text-slate-400 uppercase tracking-wider">
-                        Option {String.fromCharCode(65 + index)}
-                        {getBatchDisplayLabel(batch, index, activeBatches.length) ? ` • ${getBatchDisplayLabel(batch, index, activeBatches.length)}` : ""}
-                      </span>
-                      <span className="block text-lg font-black text-blue-700">
-                        රු. {parseFloat(batch.price).toFixed(2)}/=
-                        {parseFloat(batch.discount) > 0 && <span className="ml-1.5 text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full align-middle font-black">{batch.discount}% OFF</span>}
-                      </span>
-                    </div>
-                    <div className="text-right">
-                      <span className="block text-[10px] font-bold text-gray-400">ඉතිරි තොගය</span>
-                      <span className="block text-sm font-black text-slate-800">{formatQtyWithUnit(batch.stock, multiPricePopup.unit ?? "Kg")}</span>
-                    </div>
-                  </button>
-                ));
-              })()}
+              <div className="p-3 space-y-1.5">
+                {(() => {
+                  const activeBatches = getActivePriceBatches(multiPricePopup);
+                  return activeBatches.map((batch, index) => (
+                    <button
+                      key={batch.batchId || index}
+                      onClick={() => addToCart(multiPricePopup, batch)}
+                      className="w-full flex items-center justify-between px-3.5 py-3 rounded-xl border border-line hover:border-accent hover:bg-accent-soft transition-colors text-left"
+                    >
+                      <div>
+                        <div className="text-[11px] font-700 text-faint">
+                          {getBatchDisplayLabel(batch, index, activeBatches.length) || `Option ${String.fromCharCode(65 + index)}`}
+                        </div>
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="tnum text-[19px] font-800 text-accent">රු {parseFloat(batch.price).toFixed(2)}</span>
+                          {parseFloat(batch.discount) > 0 && (
+                            <span className="text-[10px] font-700 text-crimson bg-crimson-soft px-1.5 py-px rounded">−{batch.discount}%</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[11px] font-600 text-faint">In stock</div>
+                        <div className="tnum text-[13px] font-700 text-body">{formatQtyWithUnit(batch.stock, multiPricePopup.unit ?? "Kg")}</div>
+                      </div>
+                    </button>
+                  ));
+                })()}
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      <div className="print:hidden flex flex-col h-full">
+      {/* ══════════ QUICK ITEM — sell something that isn't in the catalog yet ══════════ */}
+      {showTempItemModal && (
+        <div className="fixed inset-0 z-50 fade print:hidden">
+          <div className="absolute inset-0 bg-ink/65 backdrop-blur-[2px]" onClick={() => setShowTempItemModal(false)}></div>
+          <div className="absolute inset-0 flex items-center justify-center p-4">
+            <form
+              onSubmit={(e) => { handleAddTempItemToCart(e); setShowTempItemModal(false); }}
+              onClick={(e) => e.stopPropagation()}
+              className="rise w-full max-w-115 bg-card rounded-2xl border border-line shadow-2xl overflow-hidden"
+            >
+              <div className="px-5 py-3 border-b border-hairline flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-[15px] font-700 text-body">Quick item</h3>
+                  <p className="text-[12px] text-muted mt-0.5">Sell something that isn't in the catalog yet</p>
+                </div>
+                <button type="button" onClick={() => { setShowTempItemModal(false); setRegisterTempAsProduct(false); }} className="h-8 px-3 shrink-0 rounded-lg text-[12.5px] font-600 text-muted hover:bg-sunken transition-colors">Esc</button>
+              </div>
+
+              <div className="p-4 space-y-2.5">
+                <input
+                  autoFocus
+                  type="text"
+                  placeholder="Item name · භාණ්ඩයේ නම"
+                  value={tempItemForm.name}
+                  onChange={(e) => setTempItemForm({ ...tempItemForm, name: e.target.value })}
+                  className="w-full h-11 px-3.5 rounded-xl bg-sunken border border-line focus:border-accent focus:bg-card focus:outline-none text-[14px] font-500 transition-colors"
+                />
+                <div className="grid grid-cols-3 gap-2">
+                  <input
+                    type="number"
+                    placeholder="Price"
+                    value={tempItemForm.price}
+                    onChange={(e) => setTempItemForm({ ...tempItemForm, price: e.target.value })}
+                    className="h-11 px-3 rounded-xl bg-sunken border border-line focus:border-accent focus:bg-card focus:outline-none tnum text-[14px] font-700 transition-colors"
+                  />
+                  <input
+                    type="number"
+                    step="0.001"
+                    placeholder="Qty"
+                    value={tempItemForm.qty}
+                    onChange={(e) => setTempItemForm({ ...tempItemForm, qty: e.target.value })}
+                    className="h-11 px-3 rounded-xl bg-sunken border border-line focus:border-accent focus:bg-card focus:outline-none tnum text-[14px] font-700 transition-colors"
+                  />
+                  <select
+                    value={tempItemForm.unit}
+                    onChange={(e) => setTempItemForm({ ...tempItemForm, unit: e.target.value })}
+                    className="h-11 px-2.5 rounded-xl bg-sunken border border-line focus:border-accent focus:outline-none text-[13.5px] font-600 text-body transition-colors"
+                  >
+                    <option value="">No unit</option>
+                    <option value="Kg">Kg</option>
+                    <option value="G">Gram</option>
+                    <option value="Pieces">Pieces</option>
+                    <option value="Packet">Packet</option>
+                    <option value="Bottle">Bottle</option>
+                  </select>
+                </div>
+                <input
+                  type="text"
+                  placeholder="Barcode (optional)"
+                  value={tempItemForm.barcode}
+                  onChange={(e) => setTempItemForm({ ...tempItemForm, barcode: e.target.value })}
+                  className="w-full h-11 px-3.5 rounded-xl bg-sunken border border-line focus:border-accent focus:bg-card focus:outline-none tnum text-[13.5px] font-500 transition-colors"
+                />
+
+                <label className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-line cursor-pointer hover:bg-sunken transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={registerTempAsProduct}
+                    onChange={(e) => setRegisterTempAsProduct(e.target.checked)}
+                    className="w-4 h-4 accent-accent"
+                  />
+                  <span className="text-[12.5px] font-600 text-body">Also save it to the catalog</span>
+                </label>
+              </div>
+
+              <div className="px-4 pb-4">
+                <button type="submit" className="w-full h-11 rounded-xl bg-accent hover:bg-accent-hi text-white text-[14px] font-700 transition-colors">
+                  Add to bill
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {/* ══════════ TENDER PANEL — where the design gets loud, because this is where errors cost money ══════════ */}
+      {showTender && activeTab === "billing" && (() => {
+        const total = calculateTotal();
+        const received = parseFloat(cashReceived) || 0;
+        const diff = received - total;
+        const paidNow = amountPaid === "" ? 0 : (parseFloat(amountPaid) || 0);
+        const onAccount = Math.max(0, total - paidNow);
+
+        const blocked =
+          paymentMethod === "Cash" ? (cashReceived === "" || diff < -0.004)
+            : paymentMethod === "Credit" ? !selectedCustomer
+              : false;
+
+        const short = paymentMethod === "Cash" && cashReceived !== "" && diff < -0.004;
+
+        return (
+          <div className="fixed inset-0 z-50 fade print:hidden">
+            <div className="absolute inset-0 bg-ink/65 backdrop-blur-[2px]" onClick={() => setShowTender(false)}></div>
+
+            <div className="absolute inset-0 flex items-center justify-center p-4">
+              <div className="rise w-full max-w-215 bg-card rounded-2xl border border-line shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+
+                <div className="bg-ink text-white px-5 py-3 flex items-center justify-between">
+                  <div>
+                    <p className="text-[11.5px] font-600 text-white/45 tracking-wide">AMOUNT DUE · ගෙවිය යුතු මුදල</p>
+                    <p className="tnum text-[28px] leading-tight font-800">රු {total.toFixed(2)}</p>
+                  </div>
+                  <button onClick={() => setShowTender(false)} className="h-8 px-3 rounded-lg text-[12.5px] font-600 text-white/55 hover:text-white hover:bg-white/10 transition-colors">Esc</button>
+                </div>
+
+                <div className="p-4 grid grid-cols-[1fr_300px] gap-4">
+
+                  {/* left: method + entry */}
+                  <div className="min-w-0 space-y-3">
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {[
+                        { k: "Cash", si: "මුදල්" },
+                        { k: "Card", si: "කාඩ්පත" },
+                        { k: "QR", si: "QR" },
+                        { k: "Credit", si: "ණය" },
+                      ].map((m) => (
+                        <button
+                          key={m.k}
+                          onClick={() => setPaymentMethod(m.k)}
+                          className={`h-14 rounded-xl border-2 flex flex-col items-center justify-center gap-0.5 transition-colors ${paymentMethod === m.k ? "bg-accent border-accent text-white" : "bg-card border-line text-muted hover:border-muted hover:text-body"}`}
+                        >
+                          <span className="text-[13.5px] font-700">{m.k}</span>
+                          <span className={`text-[10.5px] font-500 ${paymentMethod === m.k ? "text-white/65" : "text-faint"}`}>{m.si}</span>
+                        </button>
+                      ))}
+                    </div>
+
+                    {paymentMethod === "Cash" && (
+                      <div className="space-y-2.5">
+                        <div>
+                          <label className="block text-[11.5px] font-700 text-muted mb-1.5">Cash received · ලැබුණු මුදල</label>
+                          <div className="relative">
+                            <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[15px] font-600 text-faint">රු</span>
+                            <input
+                              autoFocus
+                              type="number"
+                              inputMode="decimal"
+                              placeholder="0.00"
+                              value={cashReceived}
+                              onChange={(e) => setCashReceived(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter" && !blocked) handleCheckoutAndPrint(); }}
+                              className="w-full h-14 pl-11 pr-3 rounded-xl bg-sunken border-2 border-line focus:border-accent focus:bg-card focus:outline-none tnum text-[26px] font-800 text-body transition-colors"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Note chips coloured like real LKR notes — colour reads faster than digits */}
+                        <div className="grid grid-cols-6 gap-1.5">
+                          {[
+                            { v: 50, bg: "#1E6FA8" },
+                            { v: 100, bg: "#B4532A" },
+                            { v: 500, bg: "#6B4A9C" },
+                            { v: 1000, bg: "#2F7A46" },
+                            { v: 5000, bg: "#A07219" },
+                          ].map((n) => (
+                            <button
+                              key={n.v}
+                              onClick={() => setCashReceived(String((parseFloat(cashReceived) || 0) + n.v))}
+                              style={{ background: n.bg }}
+                              className="h-11 rounded-lg text-white text-[12.5px] font-700 tnum hover:brightness-112 active:scale-95 transition-all"
+                            >
+                              {n.v.toLocaleString()}
+                            </button>
+                          ))}
+                          <button
+                            onClick={() => setCashReceived(total.toFixed(2))}
+                            className="h-11 rounded-lg border-2 border-line text-[11.5px] font-700 text-muted hover:border-accent hover:text-accent transition-colors"
+                          >
+                            Exact
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {(paymentMethod === "Card" || paymentMethod === "QR") && (
+                      <div className="rounded-xl border border-line bg-sunken px-4 py-6 text-center">
+                        <p className="text-[13.5px] font-600 text-body">Charge the full amount on the terminal</p>
+                        <p className="text-[12px] text-muted mt-1">සම්පූර්ණ මුදල පර්යන්තය හරහා අය කරන්න</p>
+                      </div>
+                    )}
+
+                    {paymentMethod === "Credit" && (
+                      <div className="space-y-2.5">
+                        <div className="relative">
+                          <label className="block text-[11.5px] font-700 text-muted mb-1.5">Customer account · ගිණුම</label>
+                          <input
+                            type="text"
+                            autoComplete="off"
+                            placeholder="Name or phone number · නම හෝ දුරකථන අංකය"
+                            value={searchPhone}
+                            onChange={(e) => setSearchPhone(e.target.value)}
+                            onKeyDown={handleCustomerSearchKeyDown}
+                            className="w-full h-11 px-3.5 rounded-xl bg-sunken border border-line focus:border-accent focus:bg-card focus:outline-none text-[14px] font-500 transition-colors"
+                          />
+                          {customerSearchLoading && <span className="absolute right-3 top-9 text-[11px] text-faint">searching…</span>}
+
+                          {showCustomerDropdown && customerSuggestions.length > 0 && (
+                            <ul className="absolute z-20 w-full mt-1 bg-card border border-line rounded-xl shadow-lg max-h-48 overflow-y-auto scroll overflow-hidden">
+                              {customerSuggestions.map((customer, index) => (
+                                <li
+                                  key={customer._id}
+                                  onClick={() => handleSelectCustomer(customer)}
+                                  onMouseEnter={() => setHighlightedCustomerIndex(index)}
+                                  className={`px-3.5 py-2.5 cursor-pointer border-b border-hairline last:border-b-0 transition-colors ${index === highlightedCustomerIndex ? "bg-accent-soft" : "hover:bg-sunken"}`}
+                                >
+                                  <p className="text-[12.5px] font-600 text-body">{customer.name}</p>
+                                  <p className="tnum text-[11px] text-faint">{customer.phone}</p>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+
+                          {showCustomerDropdown && customerSuggestions.length === 0 && !customerSearchLoading && (
+                            <div className="absolute z-20 w-full mt-1 bg-card border border-line rounded-xl shadow-lg px-3.5 py-2.5 text-[12px] text-muted">
+                              No account found — add the customer from Admin first
+                            </div>
+                          )}
+                        </div>
+
+                        {selectedCustomer && (
+                          <div className="flex items-center justify-between px-3.5 py-2.5 rounded-xl border border-accent bg-accent-soft">
+                            <span className="text-[12.5px] font-700 text-body">{selectedCustomer.name}</span>
+                            <span className="tnum text-[11.5px] font-700 text-crimson">owes රු {parseFloat(selectedCustomer.creditBalance || 0).toFixed(2)}</span>
+                          </div>
+                        )}
+
+                        <div>
+                          <label className="block text-[11.5px] font-700 text-muted mb-1.5">Paying now · දැන් ගෙවන මුදල <span className="font-500 text-faint">(optional)</span></label>
+                          <input
+                            type="number"
+                            inputMode="decimal"
+                            placeholder="0.00"
+                            value={amountPaid}
+                            onChange={(e) => setAmountPaid(e.target.value)}
+                            className="w-full h-11 px-3.5 rounded-xl bg-sunken border border-line focus:border-accent focus:bg-card focus:outline-none tnum text-[16px] font-700 transition-colors"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* right: the readout the cashier actually looks at */}
+                  <div className="flex flex-col">
+                    <div className={`flex-1 rounded-xl px-4 py-4 flex flex-col justify-center text-white ${short ? "bg-crimson" : "bg-ink2"}`}>
+                      <p className="text-[11.5px] font-700 text-white/40 tracking-wide">
+                        {paymentMethod === "Cash"
+                          ? (short ? "STILL SHORT · තව ගෙවිය යුතුයි" : "CHANGE DUE · ඉතිරි මුදල")
+                          : paymentMethod === "Credit" ? "GOES ON ACCOUNT · ණයට"
+                            : "CHARGE ON TERMINAL · පර්යන්තයෙන්"}
+                      </p>
+                      <p className="mt-1.5 flex items-baseline gap-1.5">
+                        <span className="text-[16px] font-600 text-white/55">රු</span>
+                        <span className="tnum text-[42px] leading-none font-800">
+                          {paymentMethod === "Cash"
+                            ? (cashReceived === "" ? "0.00" : Math.abs(diff).toFixed(2))
+                            : paymentMethod === "Credit" ? onAccount.toFixed(2)
+                              : total.toFixed(2)}
+                        </span>
+                      </p>
+                      <p className="mt-2.5 text-[12px] font-500 text-white/45">
+                        {paymentMethod === "Cash"
+                          ? (cashReceived === "" ? "Enter the cash you were handed"
+                            : short ? "Not enough to cover the bill"
+                              : diff < 0.005 ? "Hand back nothing — exact amount"
+                                : `Hand back රු ${diff.toFixed(2)}`)
+                          : paymentMethod === "Credit"
+                            ? (selectedCustomer
+                              ? `${selectedCustomer.name} · new balance රු ${(parseFloat(selectedCustomer.creditBalance || 0) + onAccount).toFixed(2)}`
+                              : "Choose a customer account first")
+                            : "Confirm the terminal approved it before printing"}
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={handleCheckoutAndPrint}
+                      disabled={blocked}
+                      className="mt-2.5 h-15 rounded-xl bg-accent hover:bg-accent-hi disabled:opacity-35 disabled:cursor-not-allowed text-white flex flex-col items-center justify-center transition-colors"
+                    >
+                      <span className="text-[16px] font-800 tracking-tight">Complete &amp; print</span>
+                      <span className="text-[11px] font-600 text-white/70">F12</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      <div className="print:hidden flex flex-col h-full min-h-0 overflow-hidden">
         {/* Header */}
-        <header className="bg-slate-900 text-white px-6 py-2.5 flex justify-between items-center shadow-md">
-          <h1 className="text-2xl font-black tracking-wider flex items-center gap-2">SmartStore</h1>
-          <div className="flex space-x-3">
-            <button onClick={() => setActiveTab("billing")} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${activeTab === "billing" ? "bg-blue-600 text-white shadow" : "text-gray-300 hover:bg-slate-800"}`}>Billing Window</button>
-            <button onClick={() => { setActiveTab("returns"); resetReturnUI(); }} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${activeTab === "returns" ? "bg-amber-600 text-white shadow" : "text-gray-300 hover:bg-slate-800"}`}>🔄 Returns / Exchange</button>
-            {user.role === "admin" && <button onClick={() => setActiveTab("admin")} className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${activeTab === "admin" ? "bg-blue-600 text-white shadow" : "text-gray-300 hover:bg-slate-800"}`}>Admin Dashboard</button>}
-            
-            {/* 🛠Header Logout එකේදී LocalStorage එකත් Clear කරයි */}
-            <button onClick={() => { localStorage.removeItem("pos_user"); setUser(null); }} className="bg-red-600 hover:bg-red-700 px-3 py-1.5 text-xs font-bold rounded">Logout</button>
+        <header className="h-11 shrink-0 bg-ink text-white flex items-center gap-1 px-3 select-none">
+          <div className="flex items-center gap-2 pr-3 mr-1">
+            <div className="w-6 h-6 rounded-md bg-accent grid place-items-center text-[13px] font-800">S</div>
+            <span className="text-[15px] font-700 tracking-tight">SmartStore</span>
+          </div>
+
+          <nav className="flex items-center gap-0.5">
+            <button onClick={() => setActiveTab("billing")} className={`h-7 px-3 rounded-md text-[13px] transition-colors ${activeTab === "billing" ? "bg-ink3 text-white font-600" : "font-500 text-white/55 hover:text-white hover:bg-white/8"}`}>Billing</button>
+            <button onClick={() => { setActiveTab("returns"); resetReturnUI(); }} className={`h-7 px-3 rounded-md text-[13px] transition-colors ${activeTab === "returns" ? "bg-ink3 text-white font-600" : "font-500 text-white/55 hover:text-white hover:bg-white/8"}`}>Returns</button>
+            {user.role === "admin" && (
+              <button onClick={() => setActiveTab("admin")} className={`h-7 px-3 rounded-md text-[13px] transition-colors ${activeTab === "admin" ? "bg-ink3 text-white font-600" : "font-500 text-white/55 hover:text-white hover:bg-white/8"}`}>Admin</button>
+            )}
+          </nav>
+
+          <div className="flex-1"></div>
+
+          <div className="flex items-center gap-3 text-[12px]">
+            <span className="flex items-center gap-1.5 text-white/60">
+              <span className={`w-1.5 h-1.5 rounded-full ${isOnline ? "bg-accent-hi" : "bg-gold"}`}></span>
+              {isOnline ? "Online" : "Offline"}
+            </span>
+            <span className="text-white/25">|</span>
+            <span className="text-white/80 font-500">{user.username}</span>
+            <button
+              onClick={() => { localStorage.removeItem("pos_user"); setUser(null); }}
+              className="h-7 px-2.5 rounded-md text-[12px] font-600 text-white/55 hover:text-white hover:bg-crimson transition-colors"
+            >
+              Sign out
+            </button>
           </div>
         </header>
 
         {/* Main Content */}
         <div className="flex flex-1 overflow-hidden">
           {activeTab === "billing" && (
-            <div className="flex w-full h-full flex-col lg:flex-row">
-              
-              {/* LEFT SIDE: POS CART PANEL */}
-              <div className="w-full lg:w-3/5 p-4 bg-white flex flex-col justify-between shadow-inner border-r border-gray-200">
-                <div className="flex flex-col h-full overflow-hidden">
-                  <div className="flex justify-between items-center border-b pb-2 mb-3">
-                    <h2 className="text-lg font-black text-slate-800 flex items-center gap-2">🛒 වත්මන් ​බිල්පත <span className="bg-slate-200 text-slate-700 text-xs px-2 py-0.5 rounded-full">{cart.length} Items</span></h2>
-                    <button onClick={() => { setCart([]); showToast("බිල්පත හිස් කලා"); }} className="text-xs text-red-500 hover:underline font-bold">බිල හිස් කරන්න (Clear All)</button>
-                  </div>
+            <div className="flex w-full h-full min-h-0 gap-2 p-2">
 
-                  {/* Cart List */}
-                  <div className="flex-1 overflow-y-auto pr-1">
-                    {cart.length === 0 ? (
-                      <div className="h-full flex flex-col items-center justify-center text-gray-400 py-20">
-                        <span className="text-5xl">📥</span>
-                        <p className="mt-2 text-sm font-medium">බිල්පත හිස්ව පවතී. භාණ්ඩ ඇතුලත් කරන්න.</p>
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        {cart.map((item) => {
-                          const discP = parseFloat(item.discountPercent || item.discount) || 0;
-                          const originalP = parseFloat(item.price);
-                          const finalP = originalP - (originalP * discP) / 100;
-                          // 🆕 GRAM-MODE: "Kg" unit තියෙන items වලට විතරක්, Cashier ට g/Kg entry toggle කරන්න පුළුවන්
-                          const isGramMode = item.unit === "Kg" && item.qtyInputUnit === "g";
-                          const displayQty = isGramMode
-                            ? (item.qty === "" ? "" : Math.round(parseFloat(item.qty || 0) * 1000))
-                            : item.qty;
-                          return (
-                            <div key={item.cartLineId || item._id} className={`flex items-center justify-between p-3 rounded-xl border shadow-sm hover:bg-slate-100 transition-all ${item.isTemporary ? 'bg-amber-50/70 border-amber-300' : 'bg-slate-50 border-slate-200'}`}>
-                              <div className="w-1/3">
-                                <span className="font-bold text-sm block text-slate-900 truncate">
-                                  {item.name}
-                                  {item.batchLabel && <span className="ml-1.5 text-[9px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-black align-middle">{item.batchLabel}</span>}
-                                </span>
-                                <span className="text-[11px] text-gray-500 block">1 {item.unit ?? "Kg"} = රු. {originalP.toFixed(2)}</span>
-                              </div>
-                              
-                              <div className="flex items-center space-x-1 bg-white p-1 rounded-lg border border-slate-300">
-                                <button onClick={() => updateQty(item.cartLineId, -1)} className="bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded font-bold text-xs">-1</button>
-                                {item.unit === "Kg" && <button onClick={() => updateQty(item.cartLineId, -0.1)} className="bg-slate-100 hover:bg-slate-200 px-1 py-1 rounded text-[10px] text-gray-600">-100g</button>}
-                                <input 
-                                  type="number" 
-                                  step={isGramMode ? "1" : "0.001"}
-                                  value={displayQty} 
-                                  onChange={(e) => isGramMode ? updateCartQtyDirectlyInGrams(item.cartLineId, e.target.value) : updateCartQtyDirectly(item.cartLineId, e.target.value)}
-                                  className="w-16 text-center font-black text-sm text-blue-700 focus:outline-none" 
-                                />
-                                {item.unit === "Kg" && <button onClick={() => updateQty(item.cartLineId, 0.1)} className="bg-slate-100 hover:bg-slate-200 px-1 py-1 rounded text-[10px] text-gray-600">+100g</button>}
-                                <button onClick={() => updateQty(item.cartLineId, 1)} className="bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded font-bold text-xs">+1</button>
-                                {item.unit === "Kg" ? (
-                                  <div className="flex rounded-md overflow-hidden border border-slate-300 ml-0.5 shrink-0">
-                                    <button
-                                      type="button"
-                                      onClick={() => toggleQtyInputUnit(item.cartLineId, "Kg")}
-                                      className={`px-1.5 py-1 text-[10px] font-bold transition-all ${!isGramMode ? "bg-blue-600 text-white" : "bg-white text-gray-500 hover:bg-gray-100"}`}
-                                    >
-                                      Kg
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => toggleQtyInputUnit(item.cartLineId, "g")}
-                                      className={`px-1.5 py-1 text-[10px] font-bold transition-all ${isGramMode ? "bg-blue-600 text-white" : "bg-white text-gray-500 hover:bg-gray-100"}`}
-                                    >
-                                      g
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <span className="text-xs text-gray-500 font-bold px-1">{item.unit ?? "Kg"}</span>
-                                )}
-                              </div>
+              {/* ═══════════ THE BILL — primary surface ═══════════ */}
+              <section className="flex-1 min-w-0 min-h-0 flex flex-col bg-card rounded-xl border border-line overflow-hidden">
 
-                              <div className="text-right w-1/4">
-                                <span className="font-black text-sm block text-slate-900">රු. {(finalP * parseFloat(item.qty || 0)).toFixed(2)}</span>
-                                {discP > 0 && <span className="text-[10px] bg-red-100 text-red-600 font-bold px-1.5 py-0.2 rounded">{discP}% OFF</span>}
-                              </div>
-                              <button onClick={() => { setCart(cart.filter(c => c.cartLineId !== item.cartLineId)); showToast("භාණ්ඩය ඉවත් කලා"); }} className="text-gray-400 hover:text-red-500 font-bold p-1">✕</button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                </div>
+                {/* Scan bar: the cashier's home key */}
+                <div className="shrink-0 h-13 px-2.5 flex items-center gap-2 border-b border-hairline">
+                  <div className="relative flex-1 min-w-0">
+                    <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-faint" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.2-3.2" /></svg>
+                    <input
+                      ref={billingSearchRef}
+                      type="text"
+                      autoComplete="off"
+                      spellCheck="false"
+                      value={billingSearch}
+                      onChange={(e) => { setBillingSearch(e.target.value); setBillingHighlightIndex(-1); }}
+                      onKeyDown={handleBillingSearchKeyDown}
+                      onBlur={() => setTimeout(() => setBillingHighlightIndex(-1), 150)}
+                      placeholder="Scan barcode, or type an item name  ·  බාර්කෝඩ් හෝ නම"
+                      className="w-full h-9.5 pl-9.5 pr-16 rounded-lg bg-sunken border border-line text-[14px] font-500 placeholder:text-faint placeholder:font-400 focus:bg-card focus:border-accent focus:outline-none transition-colors"
+                    />
+                    <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] font-700 text-faint bg-card border border-line rounded px-1.5 py-0.5">F2</kbd>
 
-                {/* Checkout Footer */}
-                <div className="border-t border-slate-200 pt-3 mt-2 bg-slate-50 p-4 rounded-xl">
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
-                    {['Cash', 'Card', 'QR', 'Credit'].map((method) => (
-                      <button key={method} type="button" onClick={() => setPaymentMethod(method)} className={`py-2 rounded-xl font-black text-xs tracking-wider transition-all ${paymentMethod === method ? 'bg-blue-600 text-white shadow-md' : 'bg-white border text-gray-600 hover:bg-gray-100'}`}>
-                        {method.toUpperCase()}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* UI Dynamic Inputs */}
-                  <div className="bg-white p-3 rounded-xl border border-slate-200 mb-2">
-                    {paymentMethod === "Credit" ? (
-                      <div>
-                        <label className="text-[11px] font-bold text-red-700 block mb-1">💳 පාරිභෝගිකයා දැනට ගෙවන මුදල (Paid Amount):</label>
-                        <input type="number" placeholder="ණය බිලෙන් අඩුවන මුදල (ගෙවන්නේ නැත්නම් හිස්ව තබන්න)" value={amountPaid} onChange={(e) => setAmountPaid(e.target.value)} className="w-full p-2 border rounded text-sm font-black text-slate-800 bg-red-50/30" />
-                        <div className="bg-slate-900 text-white p-3 mt-3 rounded-xl shadow relative">
-                  <h3 className="text-xs font-bold text-gray-400 mb-2">👤 CREDIT ACCOUNT LEDGER CONNECTOR</h3>
-
-                  <div className="relative">
-                    <div className="flex items-center space-x-2">
-                      {/* 🛠️ UPDATED: දැන් type කරන කොටම (Live) suggestions පෙන්වයි, Enter → තෝරාගැනීම */}
-                      <input
-                        type="text"
-                        placeholder="නම හෝ දුරකථන අංකය type කරන්න..."
-                        value={searchPhone}
-                        onChange={(e) => setSearchPhone(e.target.value)}
-                        onKeyDown={handleCustomerSearchKeyDown}
-                        autoComplete="off"
-                        className="p-2 border rounded-lg bg-slate-800 text-white flex-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                      />
-                      {customerSearchLoading && (
-                        <span className="text-[10px] text-amber-400 whitespace-nowrap">සොයමින්...</span>
-                      )}
-                    </div>
-
-                    {/* 🛠️ NEW: Live Search Suggestions Dropdown */}
-                    {showCustomerDropdown && customerSuggestions.length > 0 && (
-                      <ul className="absolute z-20 w-full mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-lg max-h-48 overflow-y-auto">
-                        {customerSuggestions.map((customer, index) => (
-                          <li
-                            key={customer._id}
-                            onClick={() => handleSelectCustomer(customer)}
-                            onMouseEnter={() => setHighlightedCustomerIndex(index)}
-                            className={`px-3 py-2 cursor-pointer border-b border-slate-700 last:border-b-0 text-xs transition-colors ${
-                              index === highlightedCustomerIndex ? "bg-blue-700/60" : "hover:bg-slate-700"
+                    {/* 🛠️ FIX: live suggestions dropdown — this is what was missing.
+                        Previously the scan bar only acted on Enter and silently grabbed
+                        a single .find() match; now every matching product is listed here. */}
+                    {billingSearch.trim() !== "" && filteredBillingProducts.length > 0 && (
+                      <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-30 max-h-72 overflow-y-auto scroll bg-card border border-line rounded-lg shadow-lg">
+                        {filteredBillingProducts.slice(0, 8).map((p, i) => (
+                          <button
+                            key={p._id}
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()} // keep focus in the input so typing continues to work
+                            onClick={() => { addToCart(p); setBillingSearch(""); setBillingHighlightIndex(-1); billingSearchRef.current?.focus(); }}
+                            className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-[13px] border-b border-hairline last:border-b-0 transition-colors ${
+                              i === billingHighlightIndex ? "bg-accent-soft" : "hover:bg-sunken"
                             }`}
                           >
-                            <p className="font-bold text-white">{customer.name}</p>
-                            <p className="text-[10px] text-gray-400">{customer.phone}</p>
-                          </li>
+                            <span className="min-w-0 truncate font-600 text-body">{p.name}</span>
+                            <span className="shrink-0 tnum text-[12px] font-700 text-accent">රු {Number(p.price).toFixed(2)}</span>
+                          </button>
                         ))}
-                      </ul>
-                    )}
-
-                    {showCustomerDropdown && customerSuggestions.length === 0 && !customerSearchLoading && (
-                      <div className="absolute z-20 w-full mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-lg px-3 py-2 text-[11px] text-gray-400">
-                        පාරිභෝගිකයෙකු සොයාගත නොහැක!
                       </div>
                     )}
                   </div>
 
-                  {selectedCustomer && (
-                    <div className="mt-2 bg-blue-900/50 p-2 rounded border border-blue-700 flex justify-between items-center text-xs">
-                      <div>Account: <span className="font-bold text-yellow-400">{selectedCustomer.name}</span></div>
-                      <div className="text-red-400 font-bold">ණය: රු. {selectedCustomer.creditBalance}/=</div>
-                    </div>
-                  )}
-                </div>
-                      </div>
-                    ) : paymentMethod === "Cash" ? (
-                      <div className="grid grid-cols-2 gap-3 bg-emerald-50/50 p-1 rounded-lg">
-                        <div>
-                          <label className="text-[11px] font-bold text-emerald-800 block mb-1">💵 ලැබුණු මුදල (Cash):</label>
-                          <input type="number" placeholder="0.00" value={cashReceived} onChange={(e) => setCashReceived(e.target.value)} className="w-full p-2 border rounded text-sm font-black text-emerald-700 bg-white" />
-                        </div>
-                        <div>
-                          <label className="text-[11px] font-bold text-emerald-800 block mb-1">🔄 ඉතිරි මුදල (Balance):</label>
-                          <div className="p-2 bg-white border border-emerald-300 rounded-lg font-black text-sm text-red-600 text-center">රු. {balanceAmount.toFixed(2)}</div>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-center py-2 text-xs font-bold text-blue-600">
-                        📱 {paymentMethod.toUpperCase()} හරහා සම්පූර්ණ මුදලම ගෙවීම් සිදු කෙරේ.
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex justify-between items-center text-xl font-black text-slate-900 border-t pt-2">
-                    <span>NET TOTAL:</span>
-                    <span className="text-2xl text-blue-600">රු. {calculateTotal().toFixed(2)}/=</span>
-                  </div>
-                  <button onClick={handleCheckoutAndPrint} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 rounded-xl shadow-lg text-lg mt-2 transition-all">
-                    PROCEED & PRINT INVOICE (F12) 🖨️
+                  <button onClick={() => setShowTempItemModal(true)} className="h-9.5 px-3 rounded-lg border border-line text-[12.5px] font-600 text-gold bg-gold-soft hover:brightness-97 transition-all flex items-center gap-1.5 shrink-0">
+                    Quick item <kbd className="text-[10px] opacity-60 font-700">F4</kbd>
                   </button>
-                </div>
-              </div>
 
-              {/* RIGHT SIDE: PRODUCTS PANEL & EMERGENCY QUICK ADD */}
-              <div className="w-full lg:w-2/5 p-4 flex flex-col space-y-4 overflow-hidden">
-                
-                {/* Emergency Unsaved Item Adding Widget */}
-                {/* 🔘 Trigger Button - ඔයාට ඕන තැනකට JSX return එකේ දාන්න */}
                   <button
-                    onClick={() => setShowTempItemModal(true)}
-                    className="flex justify-center items-center  gap-2 bg-amber-100 hover:bg-amber-200 border border-amber-300 text-amber-900 font-black px-3 py-2 rounded-lg text-xs transition-all"
+                    onClick={() => { setCart([]); showToast("බිල හිස් කලා"); }}
+                    disabled={cart.length === 0}
+                    className="h-9.5 px-3 rounded-lg border border-line text-[12.5px] font-600 text-muted hover:text-crimson hover:border-crimson hover:bg-crimson-soft disabled:opacity-35 disabled:pointer-events-none transition-all shrink-0"
                   >
-                    <span className="text-base">🚨</span>
-                    හදිසි අවස්ථා - තාවකාලික භාණ්ඩ ඇතුලත් කිරීම
-                    <span className="text-base">➕</span>
-
+                    Clear
                   </button>
+                </div>
 
-                  {/* 🪟 Modal Popup */}
-                  {showTempItemModal && (
-                    <div
-                      className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
-                      onClick={() => setShowTempItemModal(false)}
-                    >
-                      <div
-                        className="bg-linear-to-br from-amber-50 to-orange-100/60 p-4 rounded-xl border border-amber-300 shadow-xl w-full max-w-md relative"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <button
-                          onClick={() => { setShowTempItemModal(false); setRegisterTempAsProduct(false); }}
-                          className="absolute top-3 right-3 text-amber-800 hover:text-amber-950 font-black text-lg leading-none"
-                        >
-                          ✕
-                        </button>
+                {/* Column headers — encode the row grid */}
+                <div className="shrink-0 grid grid-cols-[30px_minmax(0,1fr)_216px_112px_30px] gap-2 px-2.5 h-7 items-center border-b border-hairline bg-sunken/60 text-[10.5px] font-700 text-faint tracking-wide">
+                  <div>#</div>
+                  <div>Item</div>
+                  <div className="text-center">Quantity</div>
+                  <div className="text-right">Amount</div>
+                  <div></div>
+                </div>
 
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="text-base">🚨</span>
-                          <h3 className="text-xs font-black text-amber-900 tracking-wider uppercase pr-4">
-                            හදිසි අවස්ථා - තාවකාලික භාණ්ඩ ඇතුලත් කිරීම
-                          </h3>
-                        </div>
-                        <p className="text-[10px] text-amber-800 font-semibold mb-3">
-                          Database එකේ නැති අලුත් බඩු, DB එකට සේව් නොකර කෙලින්ම මෙම බිලට පමණක් එකතු කිරීමට පහත විස්තර පුරවන්න.
-                        </p>
+                {/* Bill lines — 46px rows */}
+                <div ref={cartScrollRef} className="flex-1 min-h-0 overflow-y-auto scroll">
+                  {cart.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center gap-1 text-center px-6">
+                      <svg className="w-9 h-9 text-line mb-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M3 6h18l-1.6 9.4a2 2 0 0 1-2 1.6H7.6a2 2 0 0 1-2-1.6L4 6Z" /><circle cx="9" cy="20" r="1.3" /><circle cx="17" cy="20" r="1.3" /></svg>
+                      <p className="text-[13.5px] font-600 text-muted">Scan an item to start the bill</p>
+                      <p className="text-[12px] text-faint">බිල ආරම්භ කිරීමට භාණ්ඩයක් ස්කෑන් කරන්න</p>
+                    </div>
+                  ) : (
+                    cart.map((item, ix) => {
+                      const discP = parseFloat(item.discountPercent || item.discount) || 0;
+                      const originalP = parseFloat(item.price);
+                      const finalP = originalP - (originalP * discP) / 100;
+                      const isKg = (item.unit ?? "Kg") === "Kg";
+                      const isGramMode = isKg && item.qtyInputUnit === "g";
+                      const displayQty = isGramMode
+                        ? (item.qty === "" ? "" : Math.round(parseFloat(item.qty || 0) * 1000))
+                        : item.qty;
 
-                        <form
-                          onSubmit={(e) => {
-                            handleAddTempItemToCart(e);
-                            setShowTempItemModal(false);
-                          }}
-                          className="space-y-2"
-                        >
-                          <div className="grid grid-cols-2 gap-2">
-                            <input
-                              type="text"
-                              placeholder="භාණ්ඩයේ නම"
-                              value={tempItemForm.name}
-                              onChange={(e) => setTempItemForm({ ...tempItemForm, name: e.target.value })}
-                              className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
-                            />
-                            <input
-                              type="number"
-                              placeholder="විකුණුම් මිල (රු.)"
-                              value={tempItemForm.price}
-                              onChange={(e) => setTempItemForm({ ...tempItemForm, price: e.target.value })}
-                              className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
-                            />
-                          </div>
-                          <div className="grid grid-cols-3 gap-2">
-                            <input
-                              type="number"
-                              step="0.001"
-                              placeholder="ප්‍රමාණය"
-                              value={tempItemForm.qty}
-                              onChange={(e) => setTempItemForm({ ...tempItemForm, qty: e.target.value })}
-                              className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 font-bold"
-                            />
-                            <select
-                              value={tempItemForm.unit}
-                              onChange={(e) => setTempItemForm({ ...tempItemForm, unit: e.target.value })}
-                              className="p-2 text-xs bg-white border border-amber-300 rounded-lg font-bold"
-                            >
-                              <option value="">-- Unit නැත --</option>
-                              <option value="Kg">Kilogram (Kg)</option>
-                              <option value="G">Gram (G)</option>
-                              <option value="Pieces">Pieces</option>
-                              <option value="Packet">Packet</option>
-                              <option value="Bottle">Bottle</option>
-                            </select>
-                            <input
-                              type="text"
-                              placeholder="Barcode (Optional)"
-                              value={tempItemForm.barcode}
-                              onChange={(e) => setTempItemForm({ ...tempItemForm, barcode: e.target.value })}
-                              className="p-2 text-xs bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500"
-                            />
+                      return (
+                        <div key={item.cartLineId || item._id} className="grid grid-cols-[30px_minmax(0,1fr)_216px_112px_30px] gap-2 px-2.5 h-11.5 items-center border-b border-hairline hover:bg-sunken/70 transition-colors group">
+                          <div className="tnum text-[12px] font-600 text-faint">{ix + 1}</div>
+
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[13.5px] font-600 text-body truncate">{item.name}</span>
+                              {item.isTemporary && <span className="shrink-0 text-[9.5px] font-700 text-gold bg-gold-soft px-1.5 py-px rounded">QUICK</span>}
+                              {item.batchLabel && <span className="shrink-0 text-[9.5px] font-700 text-plum bg-plum-soft px-1.5 py-px rounded">{item.batchLabel}</span>}
+                              {discP > 0 && <span className="shrink-0 text-[9.5px] font-700 text-crimson bg-crimson-soft px-1.5 py-px rounded">−{discP}%</span>}
+                            </div>
+                            <div className="tnum text-[11px] text-faint truncate">රු {finalP.toFixed(2)} / {item.unit ?? "Kg"}</div>
                           </div>
 
-                          {/* 🆕 Database එකටත් Register කරනවද කියලා තෝරගැනීම */}
-                          <label className="flex items-start gap-2 bg-white/70 border border-amber-300 rounded-lg p-2 cursor-pointer">
+                          <div className="flex items-center justify-center gap-0.5">
+                            <button onClick={() => updateQty(item.cartLineId, isKg ? -0.1 : -1)} className="w-7 h-7 rounded-md border border-line bg-card text-muted hover:text-body hover:border-muted text-[13px] font-700 transition-colors">−</button>
                             <input
-                              type="checkbox"
-                              checked={registerTempAsProduct}
-                              onChange={(e) => setRegisterTempAsProduct(e.target.checked)}
-                              className="mt-0.5 accent-amber-600"
+                              type="number"
+                              step={isGramMode ? "1" : "0.001"}
+                              value={displayQty}
+                              onChange={(e) => isGramMode
+                                ? updateCartQtyDirectlyInGrams(item.cartLineId, e.target.value)
+                                : updateCartQtyDirectly(item.cartLineId, e.target.value)}
+                              className="w-15.5 h-7 text-center rounded-md border border-line bg-card tnum text-[13px] font-700 text-body focus:border-accent focus:outline-none transition-colors"
                             />
-                            <span className="text-[10px] text-amber-900 font-semibold leading-snug">
-                              🗄️ Add Product to Database
-                            </span>
-                          </label>
+                            {isKg ? (
+                              <div className="flex rounded-md overflow-hidden border border-line shrink-0">
+                                <button type="button" onClick={() => toggleQtyInputUnit(item.cartLineId, "Kg")} className={`px-1.5 h-7 text-[10px] font-700 transition-colors ${!isGramMode ? "bg-accent text-white" : "bg-card text-faint hover:text-body"}`}>kg</button>
+                                <button type="button" onClick={() => toggleQtyInputUnit(item.cartLineId, "g")} className={`px-1.5 h-7 text-[10px] font-700 transition-colors ${isGramMode ? "bg-accent text-white" : "bg-card text-faint hover:text-body"}`}>g</button>
+                              </div>
+                            ) : (
+                              <span className="w-10 text-[10.5px] font-600 text-faint text-center truncate">{item.unit ?? ""}</span>
+                            )}
+                            <button onClick={() => updateQty(item.cartLineId, isKg ? 0.1 : 1)} className="w-7 h-7 rounded-md border border-line bg-card text-muted hover:text-body hover:border-muted text-[13px] font-700 transition-colors">+</button>
+                          </div>
+
+                          <div className="tnum text-right text-[14.5px] font-700 text-body">
+                            {(finalP * parseFloat(item.qty || 0)).toFixed(2)}
+                          </div>
 
                           <button
-                            type="submit"
-                            className="w-full bg-amber-600 hover:bg-amber-700 text-white font-black py-2 rounded-lg text-xs transition-all shadow-sm"
+                            onClick={() => { setCart(cart.filter(c => c.cartLineId !== item.cartLineId)); showToast("භාණ්ඩය ඉවත් කලා"); }}
+                            className="w-7 h-7 rounded-md text-faint opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-crimson hover:bg-crimson-soft grid place-items-center transition-all"
                           >
-                            {registerTempAsProduct ? "➕ Register කර Bill එකට එකතු කරන්න" : "➕ Add to Bill (Without Database)"}
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"><path d="M6 6l12 12M18 6 6 18" /></svg>
                           </button>
-                        </form>
-                      </div>
-                    </div>
+                        </div>
+                      );
+                    })
                   )}
+                </div>
 
-                
-
-                {/* 🛠️ UPDATED: Category Sidebar (vertical, scrollable) + Search/Grid column - Real POS layout */}
-                <div className="flex-1 flex gap-3 min-h-0">
-
-                  {/* Category Sidebar */}
-                  <div className="w-16 sm:w-20 shrink-0 flex flex-col gap-1.5 overflow-y-auto pr-1">
-                    <button
-                      onClick={() => setBillingCategoryFilter("All")}
-                      className={`flex flex-col items-center justify-center gap-0.5 py-2 px-1 rounded-xl border text-center transition-all ${
-                        billingCategoryFilter === "All"
-                          ? "bg-blue-600 text-white border-blue-600 shadow-md"
-                          : "bg-white text-gray-600 border-gray-200 hover:border-blue-400 hover:text-blue-600"
-                      }`}
-                    >
-                      <span className="text-base leading-none">🗂️</span>
-                      <span className="text-[9px] font-bold leading-tight truncate w-full">සියල්ල</span>
-                      <span className={`text-[9px] px-1 rounded-full ${billingCategoryFilter === "All" ? "bg-white/20" : "bg-gray-100"}`}>{products.length}</span>
-                    </button>
-
-                    {PRODUCT_CATEGORIES.map((cat) => (
-                      <button
-                        key={cat.value}
-                        onClick={() => setBillingCategoryFilter(cat.value)}
-                        className={`flex flex-col items-center justify-center gap-0.5 py-2 px-1 rounded-xl border text-center transition-all ${
-                          billingCategoryFilter === cat.value
-                            ? "bg-blue-600 text-white border-blue-600 shadow-md"
-                            : "bg-white text-gray-600 border-gray-200 hover:border-blue-400 hover:text-blue-600"
-                        }`}
-                      >
-                        <span className="text-base leading-none">{cat.icon}</span>
-                        <span className="text-[9px] font-bold leading-tight truncate w-full">{cat.value}</span>
-                        <span className={`text-[9px] px-1 rounded-full ${billingCategoryFilter === cat.value ? "bg-white/20" : "bg-gray-100"}`}>{billingCategoryCounts[cat.value] || 0}</span>
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Search + Product Grid (scrolls independently from the sidebar) */}
-                  <div className="flex-1 flex flex-col gap-3 min-w-0 overflow-y pr-1">
-                    <div className="sticky top-0 z-10 bg-gray-100/95 backdrop-blur-sm pb-1 -mt-0.5">
-                      <input type="text" placeholder="🔍  භාණ්ඩයේ නම හෝ බාර්කෝඩ් එක ඇතුලත් කරන්න..." value={billingSearch} onChange={(e) => setBillingSearch(e.target.value)} className="w-full p-2.5 pl-9 border rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-medium text-sm" />
-                      <span className="absolute left-3 top-3 text-gray-400 text-sm">🔍</span>
-                    </div>
-
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1 pl-1 overflow-auto">
-                      {filteredBillingProducts.length === 0 && (
-                        <div className="col-span-2 sm:col-span-3 flex flex-col items-center justify-center text-gray-400 py-10">
-                          <span className="text-3xl mb-2">🔍</span>
-                          <p className="text-xs font-medium">මෙම වර්ගයේ / නමින් භාණ්ඩයක් හම්බ වුනේ නැහැ</p>
+                {/* ═══ TOTALS — 128px. Payment now lives in the tender panel ═══ */}
+                <div className="shrink-0 border-t border-line bg-sunken">
+                  <div className="px-3 pt-2 pb-2.5 flex items-end gap-4">
+                    <div className="flex-1 min-w-0 space-y-1">
+                      <div className="flex items-center justify-between text-[12.5px]">
+                        <span className="text-muted">{cart.length} lines · {(+cart.reduce((s, i) => s + (parseFloat(i.qty) || 0), 0).toFixed(3))} units</span>
+                        <span className="tnum font-500 text-body">{billSubtotal.toFixed(2)}</span>
+                      </div>
+                      {billDiscount > 0.004 && (
+                        <div className="flex items-center justify-between text-[12.5px]">
+                          <span className="text-muted">Item discounts</span>
+                          <span className="tnum font-600 text-crimson">−{billDiscount.toFixed(2)}</span>
                         </div>
                       )}
-                      {filteredBillingProducts.map((product) => {
-                        const discP = parseFloat(product.discount) || 0; 
+                      <div className="h-px bg-line my-1.5"></div>
+                      <div className="flex items-baseline justify-between">
+                        <span className="text-[12.5px] font-700 text-muted tracking-wide">TOTAL</span>
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="text-[14px] font-600 text-muted">රු</span>
+                          <span className="tnum text-[30px] leading-none font-800 text-accent">{calculateTotal().toFixed(2)}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => cart.length && setShowTender(true)}
+                      disabled={cart.length === 0}
+                      className="h-18.5 w-55 shrink-0 rounded-xl bg-accent hover:bg-accent-hi disabled:opacity-35 disabled:cursor-not-allowed text-white flex flex-col items-center justify-center gap-0.5 transition-colors shadow-sm"
+                    >
+                      <span className="text-[17px] font-800 tracking-tight">Take payment</span>
+                      <span className="text-[11.5px] font-600 text-white/70">මුදල් ගෙවීම · F12</span>
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              {/* ═══════════ CATALOG — secondary, collapses to nothing ═══════════ */}
+              {catalogOpen ? (
+                <aside className="w-101 shrink-0 min-h-0 flex flex-col bg-card rounded-xl border border-line overflow-hidden">
+                  <div className="shrink-0 h-13 px-2.5 flex items-center gap-2 border-b border-hairline">
+                    <button onClick={() => setCatalogOpen(false)} title="Hide catalog (F8)" className="w-8 h-8 shrink-0 rounded-lg border border-line text-muted hover:text-body hover:bg-sunken grid place-items-center transition-colors">
+                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="m9 6 6 6-6 6" /></svg>
+                    </button>
+                    <input
+                      type="text"
+                      value={catalogSearch}
+                      onChange={(e) => setCatalogSearch(e.target.value)}
+                      placeholder="Filter catalog"
+                      autoComplete="off"
+                      className="flex-1 min-w-0 h-9 px-3 rounded-lg bg-sunken border border-line text-[13px] font-500 placeholder:text-faint placeholder:font-400 focus:bg-card focus:border-accent focus:outline-none transition-colors"
+                    />
+                  </div>
+
+                  <div className="flex-1 min-h-0 flex">
+                    {/* Category rail */}
+                    <div className="w-18.5 shrink-0 border-r border-hairline overflow-y-auto scroll py-1.5 px-1.5 space-y-1">
+                      <button
+                        onClick={() => setBillingCategoryFilter("All")}
+                        className={`w-full py-2 rounded-lg border flex flex-col items-center gap-0.5 transition-colors ${billingCategoryFilter === "All" ? "bg-accent border-accent text-white" : "bg-card border-line text-muted hover:border-muted hover:text-body"}`}
+                      >
+                        <span className="text-[15px] leading-none">🗂️</span>
+                        <span className="text-[10px] font-600 leading-tight">සියල්ල</span>
+                        <span className={`tnum text-[9.5px] font-700 ${billingCategoryFilter === "All" ? "text-white/60" : "text-faint"}`}>{products.length}</span>
+                      </button>
+
+                      {PRODUCT_CATEGORIES.map((cat) => (
+                        <button
+                          key={cat.value}
+                          onClick={() => setBillingCategoryFilter(cat.value)}
+                          className={`w-full py-2 rounded-lg border flex flex-col items-center gap-0.5 transition-colors ${billingCategoryFilter === cat.value ? "bg-accent border-accent text-white" : "bg-card border-line text-muted hover:border-muted hover:text-body"}`}
+                        >
+                          <span className="text-[15px] leading-none">{cat.icon}</span>
+                          <span className="text-[10px] font-600 leading-tight truncate w-full px-0.5">{cat.value}</span>
+                          <span className={`tnum text-[9.5px] font-700 ${billingCategoryFilter === cat.value ? "text-white/60" : "text-faint"}`}>{billingCategoryCounts[cat.value] || 0}</span>
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Tiles */}
+                    {/* Tiles: fixed MINIMUM size (150×84px) via auto-fill + minmax — the standard
+                        pattern for POS/retail card grids (Square, Toast, etc. all use this shape).
+                        Tiles never shrink below 150px and never stretch out of proportion — but
+                        unlike a flat fixed-px grid, leftover row width is shared evenly instead of
+                        left as a dead gap on the right edge. More items just add scrollable rows. */}
+                    <div className="flex-1 min-w-0 overflow-y-auto scroll p-1.5 grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] auto-rows-[84px] gap-1.5 content-start">
+                      {catalogProducts.length === 0 ? (
+                        <div className="col-span-full py-10 text-center">
+                          <p className="text-[13px] font-600 text-muted">Nothing matches</p>
+                          <p className="text-[11.5px] text-faint mt-0.5">Try another category or spelling</p>
+                        </div>
+                      ) : catalogProducts.map((product) => {
+                        const discP = parseFloat(product.discount) || 0;
                         const finalPrice = product.price - (product.price * discP) / 100;
                         const isLowStock = product.stock <= (product.minStockLevel ?? 5);
                         const expStatus = getExpiryStatus(product);
-                        const hasMultiPrice = getActivePriceBatches(product).length > 1; // 🆕 MULTI-PRICE badge
-                        
+                        const dead = expStatus === "expired";
+                        const soon = expStatus === "expiring";
+                        const batchCount = getActivePriceBatches(product).length;
+
+                        /* Status rides a 3px left bar, not a pulsing ring */
+                        const bar = dead ? "bg-faint" : isLowStock ? "bg-crimson" : soon ? "bg-gold" : "bg-transparent";
+
                         return (
-                          <button 
-                            key={product._id} 
-                            onClick={() => addToCart(product)} 
-                            className={`p-3 rounded-xl shadow-sm text-left border relative transition-all active:scale-95 ${
-                              expStatus === "expired"
-                                ? 'border-gray-400 bg-gray-200 text-gray-500 cursor-not-allowed opacity-70'
-                                : isLowStock 
-                                ? 'border-red-500 bg-red-100 text-red-900 animate-pulse ring-2 ring-red-400 shadow-md shadow-red-200' 
-                                : expStatus === "expiring"
-                                ? 'border-amber-400 bg-amber-50 hover:border-amber-500'
-                                : 'bg-white hover:border-blue-400'
-                            }`}
+                          <button
+                            key={product._id}
+                            disabled={dead}
+                            onClick={() => addToCart(product)}
+                            className={`relative overflow-hidden text-left p-2 pl-2.5 rounded-lg border bg-card transition-all h-21 flex flex-col justify-between ${dead ? "border-line opacity-45 cursor-not-allowed" : "border-line hover:border-accent hover:bg-accent-soft active:scale-[.98]"}`}
                           >
-                            {discP > 0 && <span className="absolute top-1 right-1 bg-red-500 text-white text-[9px] px-1.5 rounded-full font-bold">{discP}% OFF</span>}
-                            {hasMultiPrice && <span className="absolute top-1 left-1 bg-purple-600 text-white text-[9px] px-1.5 rounded-full font-bold">💰 Multi-Price</span>}
-                            <div className="font-bold text-slate-800 text-xs truncate">{product.name}</div>
-                            <div className="text-blue-600 font-black text-sm mt-1">රු. {finalPrice.toFixed(2)}</div>
-                            <div className={`text-[10px] font-bold mt-1 ${isLowStock ? 'text-red-700 bg-red-200 px-1 py-0.5 rounded w-fit' : 'text-gray-400'}`}>
-                              {isLowStock ? `⚠️ අඩු තොග (Low): ${formatQtyWithUnit(product.stock, product.unit ?? "Kg")}` : `තොග: ${formatQtyWithUnit(product.stock, product.unit ?? "Kg")}`}
+                            <span className={`absolute left-0 top-0 bottom-0 w-0.75 ${bar}`}></span>
+                            <div className="flex items-start justify-between gap-1">
+                              <span className="text-[12px] font-600 text-body leading-tight line-clamp-2">{product.name}</span>
+                              {batchCount > 1 && <span className="shrink-0 tnum text-[9px] font-700 text-plum bg-plum-soft px-1 py-px rounded">{batchCount}</span>}
                             </div>
-                            {expStatus === "expired" && <div className="text-[10px] font-black mt-1 text-white bg-gray-600 px-1 py-0.5 rounded w-fit">⛔ EXPIRED</div>}
-                            {expStatus === "expiring" && <div className="text-[10px] font-black mt-1 text-amber-800 bg-amber-200 px-1 py-0.5 rounded w-fit">⏳ {new Date(product.expiryDate).toLocaleDateString()}</div>}
+                            <div>
+                              <div className="flex items-baseline gap-1">
+                                <span className={`tnum text-[14px] font-800 ${dead ? "text-faint line-through" : "text-accent"}`}>{finalPrice.toFixed(2)}</span>
+                                {discP > 0 && <span className="tnum text-[10px] font-600 text-faint line-through">{parseFloat(product.price).toFixed(2)}</span>}
+                              </div>
+                              <div className={`tnum text-[10px] font-600 mt-0.5 truncate ${isLowStock ? "text-crimson" : soon ? "text-gold" : "text-faint"}`}>
+                                {dead ? "Expired"
+                                  : isLowStock ? `Low · ${formatQtyWithUnit(product.stock, product.unit ?? "Kg")}`
+                                  : soon ? `Expires ${new Date(product.expiryDate).toLocaleDateString()}`
+                                  : `${formatQtyWithUnit(product.stock, product.unit ?? "Kg")} left`}
+                              </div>
+                            </div>
                           </button>
                         );
                       })}
                     </div>
                   </div>
-                </div>
-              </div>
+                </aside>
+              ) : (
+                <button
+                  onClick={() => setCatalogOpen(true)}
+                  title="Show catalog (F8)"
+                  className="w-8 shrink-0 rounded-xl bg-card border border-line text-muted hover:text-body hover:bg-sunken flex items-center justify-center transition-colors"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="m15 6-6 6 6 6" /></svg>
+                </button>
+              )}
             </div>
           )}
 
