@@ -5,7 +5,7 @@ import { db } from "./db";
 
 // 🛠️ HOSTING CONFIGURATION: Localhost සහ Render.com දෙකටම ගැලපෙන සේ පොදු URL එකක් සාදා ඇත
 // Render එකට දැමූ පසු "http://localhost:5008/api", https://supermkt-pos-backend.onrender.com/api වෙනුවට Render Live URL එක දමන්න
-const API_BASE_URL = "https://supermkt-pos-backend.onrender.com/api"; 
+const API_BASE_URL = "http://localhost:5008/api"; 
 
 // 🛠️ NEW: සියලුම Product Categories එකම තැනකින් manage කිරීමට (Admin dropdown + Billing sidebar දෙකටම use වේ)
 const PRODUCT_CATEGORIES = [
@@ -66,6 +66,11 @@ function App() {
 
   // Customer & Credit Book States
   const [customers, setCustomers] = useState([]);
+
+  // 🆕 BILL-LEVEL DISCOUNT: Special Occasion Promotions (Loyalty feature intentionally omitted)
+  const [promotions, setPromotions] = useState([]);
+  const [appliedBillDiscount, setAppliedBillDiscount] = useState(null); // { name, percent }
+  const [promotionForm, setPromotionForm] = useState({ name: "", discountPercent: "" });
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [searchPhone, setSearchPhone] = useState(""); // Holds Name or Phone query
   const [customerForm, setCustomerForm] = useState({ name: "", phone: "" });
@@ -215,6 +220,7 @@ function App() {
     if (user) {
       fetchProducts();
       fetchCustomers();
+      fetchPromotions(); // 🆕 Cashier ටත් Admin ටත් දෙකටම ඕන - Billing Screen එකේ Live discount option පෙන්වීමට
       if (user.role === "admin") {
         fetchSalesSummary();
         fetchSuppliers();
@@ -406,6 +412,69 @@ useEffect(() => {
       const response = await axios.get(`${API_BASE_URL}/customers`);
       setCustomers(response.data);
     } catch (error) { console.error(error); }
+  };
+
+  // 🆕 BILL-LEVEL DISCOUNT (Occasion only): Promotions ලබාගැනීම
+  const fetchPromotions = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/promotions`);
+      setPromotions(response.data);
+    } catch (error) { console.error(error); }
+  };
+
+  const handlePromotionSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await axios.post(`${API_BASE_URL}/promotions/add`, { ...promotionForm, type: "occasion" });
+      showToast("Discount added successfully! 🎉");
+      setPromotionForm({ name: "", discountPercent: "" });
+      fetchPromotions();
+    } catch (error) { showToast("ඇතුලත් කිරීම අසාර්ථකයි!", "error"); }
+  };
+
+  const handleActivatePromotion = async (id) => {
+    try {
+      await axios.put(`${API_BASE_URL}/promotions/activate/${id}`);
+      showToast("Discount activated successfully! ✅");
+      fetchPromotions();
+    } catch (error) { showToast("Activate කිරීම අසාර්ථකයි!", "error"); }
+  };
+
+  const handleDeactivatePromotion = async (id) => {
+    try {
+      await axios.put(`${API_BASE_URL}/promotions/deactivate/${id}`);
+      showToast("Discount deactivated! ❌");
+      fetchPromotions();
+    } catch (error) { showToast("Deactivate කිරීම අසාර්ථකයි!", "error"); }
+  };
+
+  const handleDeletePromotion = async (id) => {
+    const confirmed = await askConfirm({
+      title: "Discount එක මකා දැමීම",
+      message: "මෙම Discount එක මකා දැමීමට අවශ්‍ය බව විශ්වාසද?",
+      tone: "danger",
+      confirmLabel: "🗑️ මකන්න"
+    });
+    if (!confirmed) return;
+    try {
+      await axios.delete(`${API_BASE_URL}/promotions/delete/${id}`);
+      showToast("Discount එක මකා දැමුවා!");
+      fetchPromotions();
+    } catch (error) { showToast("මකා දැමීම අසාර්ථකයි!", "error"); }
+  };
+
+  // 🆕 Active Occasion Promotion එක (Derived) - Loyalty type එකක් තිබ්බත් මෙතනින් ignore වේ
+  const activeOccasionPromotion = promotions.find((p) => p.type === "occasion" && p.isActive);
+
+  const applyBillDiscount = () => {
+    if (!activeOccasionPromotion) return;
+    setAppliedBillDiscount({ name: activeOccasionPromotion.name, percent: activeOccasionPromotion.discountPercent });
+    showToast(`🎉 "${activeOccasionPromotion.name}" Bill එකට Apply කලා!`);
+  };
+
+  const removeBillDiscount = () => {
+    setAppliedBillDiscount(null);
+    showToast("Bill Discount එක ඉවත් කලා.");
   };
 
   // 🛠️ NEW: Suppliers ලබාගැනීම
@@ -848,13 +917,23 @@ useEffect(() => {
     setCart(newCart);
   };
 
-  const calculateTotal = () => cart.reduce((total, item) => {
+  // 🆕 Item-level discounts විතරක් apply කරපු Subtotal එක (Bill-level Discount එකට කලින්)
+  const calculateSubtotal = () => cart.reduce((total, item) => {
     const discP = parseFloat(item.discountPercent || item.discount) || 0;
     const originalP = parseFloat(item.price);
     const discountAmount = (originalP * discP) / 100;
     const finalPrice = originalP - discountAmount;
     return total + (finalPrice * parseFloat(item.qty || 0));
   }, 0);
+
+  // 🆕 Applied Occasion Promotion එකේ රුපියල් අගය
+  const calculateBillDiscountAmount = () => {
+    if (!appliedBillDiscount) return 0;
+    return calculateSubtotal() * (appliedBillDiscount.percent / 100);
+  };
+
+  // 🛠️ UPDATED: Bill-level Discount එකත් අඩු කරලා තමයි Final Total එක - Checkout/Print/Cash-validation ඔක්කොම මෙතනින්ම derive වේ
+  const calculateTotal = () => Math.max(0, calculateSubtotal() - calculateBillDiscountAmount());
 
   const handleCheckoutAndPrint = async () => {
     if (cart.length === 0) return showToast("බිල හිස්ව පවතී!", "warning");
@@ -912,7 +991,12 @@ useEffect(() => {
       cashReceived: paymentMethod === "Cash" ? receivedCash : 0,
       balanceAmount: paymentMethod === "Cash" ? balanceAmount : 0,
       amountPaid: paid, 
-      amountDue: total - paid 
+      amountDue: total - paid,
+      // 🆕 Bill-level Discount විස්තර (Audit/Reporting සඳහා)
+      billDiscountSource: appliedBillDiscount ? "occasion" : null,
+      billDiscountName: appliedBillDiscount?.name || null,
+      billDiscountPercent: appliedBillDiscount?.percent || 0,
+      billDiscountAmount: calculateBillDiscountAmount()
     };
 
     try {
@@ -979,6 +1063,7 @@ useEffect(() => {
     setPaymentMethod("Cash");
     setShowTender(false);
     setCatalogSearch("");
+    setAppliedBillDiscount(null); // 🆕 Bill Discount එකත් Reset වේ
   };
 
   const handleVoidSale = async (saleId) => {
@@ -1402,7 +1487,7 @@ useEffect(() => {
   const billSubtotal = cart.reduce(
     (sum, i) => sum + (parseFloat(i.price) || 0) * (parseFloat(i.qty) || 0), 0
   );
-  const billDiscount = billSubtotal - calculateTotal();
+  const billDiscount = billSubtotal - calculateSubtotal(); // 🛠️ FIX: calculateSubtotal (item-level only) - calculateTotal දැන් Bill-level Promo එකත් අඩු කරන නිසා
 
   // The catalog grid filters on its own field, not on the scan bar
   const catalogProducts = products
@@ -2282,6 +2367,26 @@ useEffect(() => {
                   )}
                 </div>
 
+                {/* 🆕 BILL-LEVEL DISCOUNT: Occasion Promotion Banner */}
+                {cart.length > 0 && !appliedBillDiscount && activeOccasionPromotion && (
+                  <div className="shrink-0 px-3 pt-2">
+                    <button
+                      onClick={applyBillDiscount}
+                      className="w-full bg-linear-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white text-[12.5px] font-700 py-2 px-3 rounded-lg shadow-sm transition-colors"
+                    >
+                      🎉 {activeOccasionPromotion.name} — {activeOccasionPromotion.discountPercent}% OFF ලබාගන්න
+                    </button>
+                  </div>
+                )}
+                {appliedBillDiscount && (
+                  <div className="shrink-0 px-3 pt-2">
+                    <div className="flex items-center justify-between bg-pink-50 border border-pink-200 rounded-lg px-3 py-1.5">
+                      <span className="text-[11.5px] font-600 text-pink-700">🎉 {appliedBillDiscount.name} ({appliedBillDiscount.percent}%) Apply වී ඇත</span>
+                      <button onClick={removeBillDiscount} className="text-[10.5px] font-700 text-crimson hover:underline ml-2 shrink-0">✕ ඉවත් කරන්න</button>
+                    </div>
+                  </div>
+                )}
+
                 {/* ═══ TOTALS — 128px. Payment now lives in the tender panel ═══ */}
                 <div className="shrink-0 border-t border-line bg-sunken">
                   <div className="px-3 pt-2 pb-2.5 flex items-end gap-4">
@@ -2294,6 +2399,12 @@ useEffect(() => {
                         <div className="flex items-center justify-between text-[12.5px]">
                           <span className="text-muted">Item discounts</span>
                           <span className="tnum font-600 text-crimson">−{billDiscount.toFixed(2)}</span>
+                        </div>
+                      )}
+                      {appliedBillDiscount && (
+                        <div className="flex items-center justify-between text-[12.5px]">
+                          <span className="text-muted">🎉 {appliedBillDiscount.name} ({appliedBillDiscount.percent}%)</span>
+                          <span className="tnum font-600 text-crimson">−{calculateBillDiscountAmount().toFixed(2)}</span>
                         </div>
                       )}
                       <div className="h-px bg-line my-1.5"></div>
@@ -2671,6 +2782,7 @@ useEffect(() => {
               <div className="w-48 bg-slate-800 text-gray-300 flex flex-col font-medium text-sm">
                 <button onClick={() => setAdminSubTab("products")} className={`p-3 text-left font-bold ${adminSubTab === "products" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📦 තොග කළමනාකරණය</button>
                 <button onClick={() => setAdminSubTab("customers")} className={`p-3 text-left font-bold ${adminSubTab === "customers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👥 පාරිභෝගික පොත</button>
+                <button onClick={() => setAdminSubTab("promotions")} className={`p-3 text-left font-bold ${adminSubTab === "promotions" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🎉 Special Discounts</button>
                 <button onClick={() => setAdminSubTab("suppliers")} className={`p-3 text-left font-bold ${adminSubTab === "suppliers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚚 සැපයුම්කරුවන්</button>
                 <button onClick={() => setAdminSubTab("reorder")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "reorder" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
                   <span>🔔 Low-Stock Alerts</span>
@@ -3186,6 +3298,77 @@ useEffect(() => {
                   </div>
                 )}
 
+                {/* 🆕 BILL-LEVEL DISCOUNT: Special Occasions Sub-tab (Occasion-only, no Loyalty) */}
+                {adminSubTab === "promotions" && (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* Add Promotion Form */}
+                    <div className="bg-white p-5 rounded-xl border shadow-xs h-fit">
+                      <h3 className="text-xs font-black uppercase text-slate-800 mb-4">➕ Special Discount එකක් එකතු කිරීම</h3>
+                      <form onSubmit={handlePromotionSubmit} className="space-y-4">
+                        <div>
+                          <label className="text-[11px] font-bold text-gray-600 block mb-1">Discount නම:</label>
+                          <input
+                            type="text"
+                            required
+                            value={promotionForm.name}
+                            onChange={(e) => setPromotionForm({ ...promotionForm, name: e.target.value })}
+                            className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white"
+                            placeholder="උදා: අලුත් අවුරුදු සැණකෙළිය"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[11px] font-bold text-gray-600 block mb-1">Discount ප්‍රතිශතය (%):</label>
+                          <input
+                            type="number"
+                            required
+                            min="0"
+                            max="100"
+                            step="0.1"
+                            value={promotionForm.discountPercent}
+                            onChange={(e) => setPromotionForm({ ...promotionForm, discountPercent: e.target.value })}
+                            className="w-full p-2 border rounded text-xs font-black text-emerald-700"
+                            placeholder="10"
+                          />
+                        </div>
+                        <button type="submit" className="w-full bg-blue-600 text-white py-2 rounded text-xs font-bold shadow-md">Set Discount</button>
+                      </form>
+                    </div>
+
+                    {/* Promotions List */}
+                    <div className="lg:col-span-2 bg-white rounded-xl border shadow-xs overflow-hidden h-fit">
+                      <div className="p-4 border-b bg-gray-50">
+                        <h3 className="text-xs font-black uppercase text-slate-800">🎉 Special Discounts</h3>
+                        <p className="text-[10px] text-gray-400 mt-0.5">එකවර එකක් විතරයි Active විය හැක - Cashier ට Billing Screen එකේදී Apply කරන්න පුළුවන්</p>
+                      </div>
+                      {promotions.filter((p) => p.type === "occasion").length === 0 ? (
+                        <div className="p-6 text-center text-gray-400 text-xs">තවම Occasion Promotions නැත</div>
+                      ) : (
+                        <div className="divide-y divide-gray-100">
+                          {promotions.filter((p) => p.type === "occasion").map((p) => (
+                            <div key={p._id} className={`flex justify-between items-center px-4 py-3 ${p.isActive ? "bg-pink-50" : ""}`}>
+                              <div>
+                                <p className="text-xs font-bold text-slate-800">
+                                  {p.name}
+                                  {p.isActive && <span className="ml-1.5 text-[9px] bg-pink-600 text-white px-1.5 py-0.5 rounded-full font-black align-middle">ACTIVE</span>}
+                                </p>
+                                <p className="text-[10px] text-gray-500">{p.discountPercent}% OFF</p>
+                              </div>
+                              <div className="space-x-1.5 shrink-0">
+                                {p.isActive ? (
+                                  <button onClick={() => handleDeactivatePromotion(p._id)} className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-2 py-1 rounded text-[10px] font-bold">Deactivate</button>
+                                ) : (
+                                  <button onClick={() => handleActivatePromotion(p._id)} className="bg-pink-600 hover:bg-pink-700 text-white px-2 py-1 rounded text-[10px] font-bold">Activate</button>
+                                )}
+                                <button onClick={() => handleDeletePromotion(p._id)} className="bg-red-100 hover:bg-red-600 text-red-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold">🗑️</button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {/* 🛠️ NEW: Suppliers Sub-tab with Balance Due Ledger */}
                 {adminSubTab === "suppliers" && (
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -3644,6 +3827,18 @@ useEffect(() => {
 
         {/* Financial Summary */}
         <div className="space-y-1 mt-2 text-[11px] pt-2">
+          {appliedBillDiscount && (
+            <>
+              <div className="flex justify-between text-gray-600">
+                <span>උප එකතුව (Subtotal)</span>
+                <span>රු. {calculateSubtotal().toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-gray-600">
+                <span>{appliedBillDiscount.name} ({appliedBillDiscount.percent}%)</span>
+                <span>- රු. {calculateBillDiscountAmount().toFixed(2)}</span>
+              </div>
+            </>
+          )}
           <div className="flex justify-between font-bold text-sm">
             <span>මුළු එකතුව</span>
             <span className="border-b-4 border-double border-t pt-1 pb-1">රු. {calculateTotal().toFixed(2)}</span>
