@@ -7,6 +7,34 @@ import { db } from "./db";
 // Render එකට දැමූ පසු "http://localhost:5008/api", https://supermkt-pos-backend.onrender.com/api වෙනුවට Render Live URL එක දමන්න
 const API_BASE_URL = "https://supermkt-pos-backend.onrender.com/api"; 
 
+// 🔐 AUTH: page load වෙනකොටම, කලින් session එකකින් token එකක් localStorage එකේ save වෙලා
+// තිබුනොත් ඒක axios වල default header එකට දාගන්නවා - ඒකෙන් පස්සේ APP එකේ තියෙන axios.get/
+// post/put/delete call එකකටවත් වෙනම header එකක් attach කරන්න ඕන නෑ, සියල්ලටම automatic ව යනවා.
+const storedToken = localStorage.getItem("pos_token");
+if (storedToken) {
+  axios.defaults.headers.common["Authorization"] = `Bearer ${storedToken}`;
+}
+
+// 🔐 AUTH: Token එක නැති/වැරදි/expired නම් backend එකෙන් 401 එකක් එනවා - ඒක මෙතනින්ම catch
+// කරලා, session එක clear කරලා, login screen එකට ආපහු යවනවා. මේක නැත්නම් හැම button
+// click එකකදීම "Error" toast එකක් විතරක් පෙන්නලා user කන්ෆියුස් වෙනවා ඇයි කියලා තේරෙන්නේ නැතුව.
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem("pos_token");
+      localStorage.removeItem("pos_user");
+      delete axios.defaults.headers.common["Authorization"];
+      // App() component එකේ state එක reset කරන්න simplest ක්‍රමය - login screen එකට ආපහු එනවා
+      if (!sessionStorage.getItem("pos_session_expired_reload")) {
+        sessionStorage.setItem("pos_session_expired_reload", "1");
+        window.location.reload();
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 // 🛠️ NEW: සියලුම Product Categories එකම තැනකින් manage කිරීමට (Admin dropdown + Billing sidebar දෙකටම use වේ)
 const PRODUCT_CATEGORIES = [
   { value: "Grocery", label: "Grocery (සිල්ලර බඩු)", icon: "👜" },
@@ -34,6 +62,14 @@ const roundQty = (num) => Math.round((parseFloat(num) || 0) * 1000) / 1000;
 // - "Kg" Unit එකේදී, ප්‍රමාණය 1ට වඩා අඩු නම් (උදා: 0.5 Kg) → ග්‍රෑම් වලට Convert කර "500g" විදිහට පෙන්වයි
 // - අනිත් සියලුම Units වලට, සාමාන්‍ය symbol එකම (kg/Pieces/Packet/Bottle) පෙන්වයි
 // - Unit එකක් තෝරලා නැත්නම් (Empty), symbol එකක් නැතුව ප්‍රමාණය විතරක් පෙන්වයි
+// 🆕 PHONE VALIDATION: Sri Lankan numbers — 10 digits starting with 0 (0771234567),
+// or the same number written with a +94 / 94 country code. Spaces/dashes are
+// tolerated while typing but stripped before checking.
+const isValidPhone = (phone) => {
+  const cleaned = (phone || "").replace(/[\s-]/g, "");
+  return /^(0\d{9}|(\+94|94)\d{9})$/.test(cleaned);
+};
+
 const formatQtyWithUnit = (qty, unit) => {
   const qtyNum = roundQty(qty); // 🛠️ Floating-point drift (3.5500000000000007 වගේ) මෙතනින්ම clean වෙනවා
   if (unit === "Kg" && qtyNum > 0 && qtyNum < 1) {
@@ -45,11 +81,73 @@ const formatQtyWithUnit = (qty, unit) => {
 };
 
 function App() {
-  const [activeTab, setActiveTab] = useState("billing");
-  const [adminSubTab, setAdminSubTab] = useState("products");
+  // 🛠️ FIX: page refresh always dropped you back on Billing regardless of what
+  // screen you were on. Now the last tab survives a refresh (sessionStorage —
+  // clears when the browser/tab actually closes, so it doesn't linger forever).
+  const [activeTab, setActiveTab] = useState(() => {
+    try {
+      return sessionStorage.getItem("pos_activeTab") || "billing";
+    } catch {
+      return "billing";
+    }
+  });
+  const [adminSubTab, setAdminSubTab] = useState(() => {
+    try {
+      return sessionStorage.getItem("pos_adminSubTab") || "products";
+    } catch {
+      return "products";
+    }
+  });
   const [products, setProducts] = useState([]);
   const [cart, setCart] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  // 🆕 HOLD BILL (Park Sale): cashier කෙනෙක්ට cart එකක් Hold කරලා, අලුත් cart එකක් ආරම්භ කරන්න
+  // පුළුවන් - restaurant/POS systems වල "Park Sale" / "Suspend Ticket" කියන feature එකමයි.
+  // Device එකටම locally තියෙනවා (server එකට sync වෙන්නේ නෑ - checkout වුනාට පස්සේ විතරයි server එකට යන්නේ),
+  // browser refresh එකකින්/power cut එකකින් නැති වෙන්නෙ නැතුව localStorage එකේ persist කරයි.
+  const [heldBills, setHeldBills] = useState(() => {
+    try {
+      const saved = localStorage.getItem("pos_held_bills");
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
+  const [showHeldBillsPanel, setShowHeldBillsPanel] = useState(false);
+
+  // 🆕 ON-DEMAND PRINTING: checkout එක සාර්ථක වුනාම auto-print කරනවා වෙනුවට, මේ snapshot එකේ
+  // අන්තිමට complete උනු sale එකේ දත්ත ගබඩා කරගෙන, cashier කැමති වෙලාවක "Print" කරන්න පුළුවන් විදිහට.
+  // (cart එක checkout එකෙන් පස්සේ reset වුනාට, receipt එක මේ snapshot එකෙන් render වෙන නිසා වැරදෙන්නේ නෑ.)
+  const [lastCompletedSale, setLastCompletedSale] = useState(null);
+  const [showSaleCompleteModal, setShowSaleCompleteModal] = useState(false);
+
+  // 🆕 RECENT BILLS QUEUE: Print කරපු/නොකරපු *හැම* bill එකක්ම (current session එකේ විතරක් නෙවෙයි)
+  // මෙතන store වෙනවා - cashier ට පස්සේ ඕන වෙලාවක (hours කිහිපයකට පස්සේ වුනත්, shift මාරු වුනත්)
+  // හොයාගෙන print කරගන්න පුළුවන්. Device එකේම localStorage එකේ persist වෙනවා, දවස් 3කට පස්සේ
+  // (auto-prune) පරණ entries ඉවත් වෙනවා list එක ඉතුරු අනවශ්‍ය ලෙස වැඩෙන්නේ නැතුව.
+  const RECENT_BILLS_RETENTION_MS = 3 * 24 * 60 * 60 * 1000; // දවස් 3
+  const RECENT_BILLS_MAX = 150;
+  const pruneRecentBills = (bills) =>
+    bills
+      .filter((b) => Date.now() - new Date(b.date).getTime() < RECENT_BILLS_RETENTION_MS)
+      .slice(0, RECENT_BILLS_MAX);
+
+  const [recentBills, setRecentBills] = useState(() => {
+    try {
+      const saved = localStorage.getItem("pos_recent_bills");
+      return saved ? pruneRecentBills(JSON.parse(saved)) : [];
+    } catch { return []; }
+  });
+  const [showRecentBillsPanel, setShowRecentBillsPanel] = useState(false);
+  const [recentBillsFilter, setRecentBillsFilter] = useState("unprinted"); // "unprinted" | "all"
+
+  // Held Bills සහ Recent Bills දෙකම localStorage persist කරයි
+  useEffect(() => {
+    try { localStorage.setItem("pos_held_bills", JSON.stringify(heldBills)); } catch {}
+  }, [heldBills]);
+
+  useEffect(() => {
+    try { localStorage.setItem("pos_recent_bills", JSON.stringify(recentBills)); } catch {}
+  }, [recentBills]);
 
   // 🆕 MULTI-PRICE POPUP: Scan/Search කරන භාණ්ඩයට Price Batches කිහිපයක් තියෙනවා නම්, තෝරාගන්න popup එකට
   const [multiPricePopup, setMultiPricePopup] = useState(null); // holds the product pending price selection
@@ -108,9 +206,16 @@ function App() {
   });
 
   // 🛠️ UPDATED: සිස්ටම් එක Refresh කරද්දී LocalStorage එක පරීක්ෂා කර ලොග් වී සිටින පරිශීලකයා රඳවා ගනී
+  // 🔐 AUTH: token එකකින් තොරව user session එකක් valid කරගන්න බෑ - මේ update එකට කලින්
+  // login වෙලා තිබ්බ කෙනෙක්ට pos_user තියෙනවා ඒත් pos_token නෑ, ඒක stale session එකක් නිසා clear කරලා
+  // නැවත login කරන්න යවනවා (එක පාරක් විතරයි වෙන්නේ).
   const [user, setUser] = useState(() => {
     const savedUser = localStorage.getItem("pos_user");
-    return savedUser ? JSON.parse(savedUser) : null;
+    const savedToken = localStorage.getItem("pos_token");
+    if (savedUser && savedToken) return JSON.parse(savedUser);
+    localStorage.removeItem("pos_user");
+    localStorage.removeItem("pos_token");
+    return null;
   });
   const [loginForm, setLoginForm] = useState({ username: "", password: "" });
   const [loginError, setLoginError] = useState("");
@@ -121,10 +226,12 @@ function App() {
   const [showTender, setShowTender] = useState(false);       // payment moved out of the footer
   const [catalogOpen, setCatalogOpen] = useState(true);      // F8 collapses it for scanner-only work
   const [catalogSearch, setCatalogSearch] = useState("");    // separate from the scan bar
+  const [showVoidedSales, setShowVoidedSales] = useState(false); // 🆕 hidden by default to declutter; toggle brings them back for the audit trail
   const [billingHighlightIndex, setBillingHighlightIndex] = useState(-1); // 🛠️ FIX: keyboard nav for the scan-bar suggestions dropdown
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const billingSearchRef = useRef(null);
   const cartScrollRef = useRef(null);
+  const productFormRef = useRef(null); // 🆕 so Edit can scroll the form into view
 
   // Product CRUD States
   const [isEditing, setIsEditing] = useState(false);
@@ -162,8 +269,7 @@ function App() {
   const [expiringProducts, setExpiringProducts] = useState([]);
 
   // 🆕 PRINT RECEIPT: අන්තිමට Checkout කරපු Sale එකේ Professional Invoice Number එක (Return search එකට use වෙන්නේ මේකයි)
-  const [lastInvoiceNo, setLastInvoiceNo] = useState(null);
-  const [lastSaleIsOffline, setLastSaleIsOffline] = useState(false);
+  // 🆕 lastInvoiceNo/lastSaleIsOffline replaced by the lastCompletedSale snapshot (see near the cart state)
 
   // Emergency Temp Item Form State (For Any Role)
   const [tempItemForm, setTempItemForm] = useState({ name: "", price: "", qty: "1", unit: "Kg", barcode: "" });
@@ -229,6 +335,36 @@ function App() {
       fetchExpiringProducts();
     }
   }, [user]);
+
+  // 🆕 Persist the active tab across refreshes, and make sure a cashier account
+  // can never land on a restricted (admin-only) tab (e.g. if "admin" was left over
+  // from a previous session on a shared till). Billing AND Returns are both fine
+  // for a cashier — only "admin" is off-limits to them.
+  useEffect(() => {
+    if (user?.role === "cashier" && activeTab !== "billing" && activeTab !== "returns") {
+      setActiveTab("billing");
+      return;
+    }
+    try { sessionStorage.setItem("pos_activeTab", activeTab); } catch {}
+  }, [activeTab, user]);
+
+  // 🆕 Same fix, one level deeper: persist which ADMIN sub-tab (Reorder, Expiry,
+  // Sales, etc.) was open too — otherwise a refresh kept you on "Admin" but
+  // silently bounced you back to the default "Products" sub-tab.
+  useEffect(() => {
+    try { sessionStorage.setItem("pos_adminSubTab", adminSubTab); } catch {}
+  }, [adminSubTab]);
+
+  // 🆕 LIVE SALES LOG: fetchSalesSummary() only ever ran when THIS session did the
+  // checkout/void/return — so a sale from another till, or another browser tab,
+  // never showed up here until a manual page refresh. Polling every 5s while this
+  // specific tab is open gives near-real-time updates without background load the
+  // rest of the time (it stops the instant you navigate away).
+  useEffect(() => {
+    if (!(user?.role === "admin" && activeTab === "admin" && adminSubTab === "sales")) return;
+    const interval = setInterval(() => { fetchSalesSummary(); }, 5000);
+    return () => clearInterval(interval);
+  }, [user, activeTab, adminSubTab]);
 
   // Escape key + background scroll lock
 useEffect(() => {
@@ -522,6 +658,9 @@ useEffect(() => {
   // --- CUSTOMER CRUD ---
   const handleCustomerSubmit = async (e) => {
     e.preventDefault();
+    if (!isValidPhone(customerForm.phone)) {
+      return showToast("⚠️ නිවැරදි දුරකථන අංකයක් ඇතුලත් කරන්න (උදා: 0771234567)", "warning");
+    }
     try {
       if (isEditingCustomer) {
         // 🛠️ Port එක 5008 සහ API Base URL එකට ගැළපෙන සේ සකසා ඇත
@@ -598,18 +737,23 @@ useEffect(() => {
   const handleSettleCredit = async (e) => {
     e.preventDefault();
     try {
-      await axios.post(`${API_BASE_URL}/customers/pay-credit/${creditPayment.customerId}`, {
+      // 🆕 backend එකෙන් ආපු message එකම පාවිච්චි කරයි - ණයට වඩා වැඩි මුදලක් ගෙව්වොත්,
+      // "ආපසු දෙන්න ඕන මුදල: රු.X" කියලා server එකෙන් එවන note එක cashier ට මෙතනින්ම පේනවා
+      const response = await axios.post(`${API_BASE_URL}/customers/pay-credit/${creditPayment.customerId}`, {
         amount: creditPayment.amount
       });
-      showToast("ණය මුදල සාර්ථකව කපා හැරියා! 🎉");
+      showToast(response.data.message || "ණය මුදල සාර්ථකව කපා හැරියා! 🎉", response.data.changeGiven > 0 ? "warning" : "success");
       setCreditPayment({ customerId: "", amount: "" });
       fetchCustomers();
-    } catch (error) { showToast("ණය පියවීම අසාර්ථකයි!", "error"); }
+    } catch (error) { showToast(error.response?.data?.message || "ණය පියවීම අසාර්ථකයි!", "error"); }
   };
 
   // --- SUPPLIER CRUD ---
   const handleSupplierSubmit = async (e) => {
     e.preventDefault();
+    if (!isValidPhone(supplierForm.phone)) {
+      return showToast("⚠️ නිවැරදි දුරකථන අංකයක් ඇතුලත් කරන්න (උදා: 0771234567)", "warning");
+    }
     try {
       if (isEditingSupplier) {
         await axios.put(`${API_BASE_URL}/suppliers/update/${editSupplierId}`, supplierForm);
@@ -704,13 +848,15 @@ useEffect(() => {
   const handleSettleSupplierPayment = async (e) => {
     e.preventDefault();
     try {
-      await axios.post(`${API_BASE_URL}/suppliers/pay/${supplierPayment.supplierId}`, {
+      // 🆕 backend එකෙන් ආපු message එකම පාවිච්චි කරයි - ණයට වඩා වැඩි මුදලක් ගෙව්වොත්,
+      // "ආපසු ලැබෙන්න ඕන මුදල: රු.X" කියලා server එකෙන් එවන note එක මෙතනින්ම පේනවා
+      const response = await axios.post(`${API_BASE_URL}/suppliers/pay/${supplierPayment.supplierId}`, {
         amount: supplierPayment.amount
       });
-      showToast("ගෙවීම සාර්ථකව සටහන් කලා! 💵");
+      showToast(response.data.message || "ගෙවීම සාර්ථකව සටහන් කලා! 💵", response.data.changeGiven > 0 ? "warning" : "success");
       setSupplierPayment({ supplierId: "", amount: "" });
       fetchSuppliers();
-    } catch (error) { showToast("ගෙවීම අසාර්ථකයි!", "error"); }
+    } catch (error) { showToast(error.response?.data?.message || "ගෙවීම අසාර්ථකයි!", "error"); }
   };
 
   // --- BILLING LOGIC ---
@@ -718,6 +864,19 @@ useEffect(() => {
   const getActivePriceBatches = (product) => {
     if (!Array.isArray(product.batches)) return [];
     return product.batches.filter((b) => parseFloat(b.stock) > 0);
+  };
+
+  // 🆕 TRUE total stock: for products with price batches, the SUM of the batches'
+  // own stock is the real source of truth — not the separate product.stock field,
+  // which can silently drift out of sync with the batches (e.g. shows 18 while the
+  // batches actually sum to 17, or shows 3 while they sum to 4). Every place that
+  // displays or checks a product's stock should read through this, not product.stock
+  // directly, so the number shown always matches what's actually sellable.
+  const getTotalStock = (product) => {
+    if (Array.isArray(product.batches) && product.batches.length > 0) {
+      return product.batches.reduce((sum, b) => sum + (parseFloat(b.stock) || 0), 0);
+    }
+    return parseFloat(product.stock) || 0;
   };
 
   // 🆕 MULTI-PRICE: Batch එකකට Default Label එකක් සකසාගැනීම (Admin විසින් Label එකක් නොදුන්නොත්)
@@ -731,6 +890,20 @@ useEffect(() => {
 
   // 🛠️ UPDATED (Multi-Price Popup): scannedBatch එකක් දුන්නොත් කෙලින්ම එම මිලෙන් Cart එකට එකතු කරයි,
   //     නැත්තම් Product එකට Price Batches කිහිපයක් තියෙනවනම් තෝරන්න Popup එක පෙන්වයි
+  // 🆕 STOCK-AWARE QUANTITY: single source of truth for "how much of this exact
+  // item/batch is actually available right now" — used everywhere qty can change,
+  // so a cashier can never scan/click/type past what's actually in stock.
+  const getAvailableStock = (item) => {
+    if (item.isTemporary) return Infinity; // emergency items aren't stock-tracked the same way
+    const dbProduct = products.find(p => p._id === item._id);
+    if (!dbProduct) return parseFloat(item.stock) || 0;
+    if (item.batchId && Array.isArray(dbProduct.batches)) {
+      const batch = dbProduct.batches.find(b => b.batchId === item.batchId);
+      return batch ? (parseFloat(batch.stock) || 0) : 0;
+    }
+    return getTotalStock(dbProduct);
+  };
+
   const addToCart = (product, selectedBatch = null) => {
     // 🆕 EXPIRY CHECK: කල් ඉකුත් වූ භාණ්ඩයක් විකිණීමට ඉඩ නොදේ
     const expiryStatus = getExpiryStatus(product);
@@ -764,15 +937,32 @@ useEffect(() => {
     // 🆕 Cart line එකේ Unique Identity එක - එකම Product එකට Batch දෙකක් cart එකේ වෙන වෙනම පේන්න ඕන නිසා
     const cartLineId = batchId ? `${product._id}__${batchId}` : product._id;
 
+    // 🆕 OUT-OF-STOCK CHECK: an empty shelf can't be added to a bill, full stop
+    const stockNow = activeBatch ? (parseFloat(activeBatch.stock) || 0) : getTotalStock(product);
+    if (!product.isTemporary && stockNow <= 0) {
+      return showToast(`🚫 "${product.name}"${batchLabel ? ` (${batchLabel})` : ""} තොගයේ නැත! (Out of stock)`, "error");
+    }
+
     const existingIndex = cart.findIndex((item) => item.cartLineId === cartLineId);
     if (existingIndex !== -1) {
       const newCart = [...cart];
-      newCart[existingIndex].qty = parseFloat(newCart[existingIndex].qty) + 1;
+      const currentQty = parseFloat(newCart[existingIndex].qty) || 0;
+      if (!product.isTemporary && currentQty + 1 > stockNow) {
+        return showToast(`⚠️ තව එකතු කළ නොහැක — තොගයේ ඇත්තේ ${formatQtyWithUnit(stockNow, product.unit ?? "Kg")} පමණි.`, "warning");
+      }
+      newCart[existingIndex].qty = currentQty + 1;
       setCart(newCart);
     } else {
+      // 🆕 STOCK CAP on the very first add too: a tile always used to add exactly "1"
+      // regardless of unit — for a Kg item with 0.6kg left, that meant 1kg landed in
+      // the bill despite only 600g actually being in stock. Now it caps to what's there.
+      const initialQty = product.isTemporary ? 1 : Math.min(1, stockNow);
+      if (!product.isTemporary && stockNow < 1) {
+        showToast(`ℹ️ තොගයේ ඇත්තේ ${formatQtyWithUnit(stockNow, product.unit ?? "Kg")} පමණි — ඒ ප්‍රමාණයම එකතු කලා.`, "warning");
+      }
       setCart([...cart, {
         ...product,
-        qty: 1,
+        qty: initialQty,
         price: effectivePrice, // 🆕 තෝරාගත් Batch එකේ මිලෙන් Override කරයි
         costPrice: batchCostPrice, // 🆕 එම Batch එකේම Cost Price එකෙන් ලාභය ගණනය වෙන්න
         marketPrice: batchMarketPrice, // 🆕 එම Batch එකේම MRP එකෙන් Savings ගණනය වෙන්න
@@ -882,21 +1072,42 @@ useEffect(() => {
   };
 
   // 🛠️ UPDATED (Multi-Price): _id වෙනුවට cartLineId එකෙන් match කරයි (එකම Product එකට Batch දෙකක් cart එකේ තිබ්බොත් හසුරුවගන්න)
+  // 🆕 STOCK CAP: typing a qty higher than what's in stock now clamps to the max available, with a warning
   const updateCartQtyDirectly = (lineId, value) => {
     const newCart = cart.map((item) => {
-      if (item.cartLineId === lineId) return { ...item, qty: value };
-      return item;
+      if (item.cartLineId !== lineId) return item;
+      if (value === "") return { ...item, qty: "" };
+      const desired = parseFloat(value);
+      if (isNaN(desired)) return item;
+      if (!item.isTemporary) {
+        const stockNow = getAvailableStock(item);
+        if (desired > stockNow) {
+          showToast(`⚠️ තොගයේ ඇත්තේ ${formatQtyWithUnit(stockNow, item.unit ?? "Kg")} පමණි — ඒ ප්‍රමාණයටම සකසන ලදී.`, "warning");
+          return { ...item, qty: stockNow };
+        }
+      }
+      return { ...item, qty: desired };
     });
     setCart(newCart);
   };
 
   // 🆕 GRAM-MODE INPUT: User ග්‍රෑම් වලින් (500, 250 ආදී Whole Numbers) type කරයි - Storage එකට Kg බවට convert කරයි
+  // 🆕 STOCK CAP: same clamp as above, converted through grams → kg first
   const updateCartQtyDirectlyInGrams = (lineId, gramsValue) => {
     const newCart = cart.map((item) => {
       if (item.cartLineId !== lineId) return item;
       if (gramsValue === "") return { ...item, qty: "" };
       const grams = parseFloat(gramsValue);
-      return { ...item, qty: isNaN(grams) ? item.qty : grams / 1000 };
+      if (isNaN(grams)) return item;
+      const desiredKg = grams / 1000;
+      if (!item.isTemporary) {
+        const stockNow = getAvailableStock(item);
+        if (desiredKg > stockNow) {
+          showToast(`⚠️ තොගයේ ඇත්තේ ${formatQtyWithUnit(stockNow, item.unit ?? "Kg")} පමණි — ඒ ප්‍රමාණයටම සකසන ලදී.`, "warning");
+          return { ...item, qty: stockNow };
+        }
+      }
+      return { ...item, qty: desiredKg };
     });
     setCart(newCart);
   };
@@ -910,7 +1121,16 @@ useEffect(() => {
     const newCart = cart.map((item) => {
       if (item.cartLineId === lineId) {
         const newQty = roundQty(parseFloat(item.qty) + amount); // 🛠️ Repeated -100g/+100g clicks drift වළක්වයි
-        return { ...item, qty: newQty < 0.001 ? 0.001 : newQty };
+        const floored = newQty < 0.001 ? 0.001 : newQty;
+        // 🆕 STOCK CAP: "+" can never push qty past what's actually in stock
+        if (amount > 0 && !item.isTemporary) {
+          const stockNow = getAvailableStock(item);
+          if (floored > stockNow) {
+            showToast(`⚠️ තව එකතු කළ නොහැක — තොගයේ ඇත්තේ ${formatQtyWithUnit(stockNow, item.unit ?? "Kg")} පමණි.`, "warning");
+            return { ...item, qty: stockNow < 0.001 ? 0.001 : stockNow };
+          }
+        }
+        return { ...item, qty: floored };
       }
       return item;
     });
@@ -950,7 +1170,7 @@ useEffect(() => {
       if (item.isTemporary) continue; 
       const dbProduct = products.find(p => p._id === item._id);
       // 🛠️ UPDATED (Multi-Price): batchId එකක් තෝරලා තියෙනවනම්, ඒ Batch එකේම ඉතිරි තොගය පරීක්ෂා කරයි
-      let availableStock = dbProduct ? dbProduct.stock : 0;
+      let availableStock = dbProduct ? getTotalStock(dbProduct) : 0;
       if (item.batchId && dbProduct && Array.isArray(dbProduct.batches)) {
         const dbBatch = dbProduct.batches.find(b => b.batchId === item.batchId);
         availableStock = dbBatch ? parseFloat(dbBatch.stock) : 0;
@@ -999,21 +1219,43 @@ useEffect(() => {
       billDiscountAmount: calculateBillDiscountAmount()
     };
 
+    // 🆕 ON-DEMAND PRINTING: cart එක reset වෙන්න කලින්ම, receipt එකට ඕන සියලුම දත්ත snapshot
+    // එකක් විදිහට frozen කරගන්නවා - cart reset වුනාට පස්සේ cashier print කරන්න ගියත් receipt එක හරියටම පේනවා.
+    const buildSaleSnapshot = (invoiceNo, isOffline) => ({
+      id: `sale_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      invoiceNo,
+      isOffline,
+      printed: false, // 🆕 මේ bill එක print කරලාද කියලා track කරයි - "Reprint/Bills" panel එකේ badge එකට
+      cashierName: user.username,
+      date: new Date().toISOString(),
+      // 🆕 Receipt එකේ Customer line එකට - Credit customer කෙනෙක් සම්බන්ධ කරලා තියෙනවනම් ඒ නම,
+      // නැත්නම් (Cash/Card/QR, customer නැතුව) "Cash Customer" කියලා පෙන්වයි
+      customerLabel: (paymentMethod === "Credit" && selectedCustomer)
+        ? selectedCustomer.name
+        : "මුදල් පාරිභෝගිකයා (Cash Customer)",
+      items: cart,
+      paymentMethod,
+      appliedBillDiscount,
+      subtotal: calculateSubtotal(),
+      billDiscountAmount: calculateBillDiscountAmount(),
+      total,
+      amountPaid: paid,
+      cashReceived: receivedCash,
+      balanceAmount
+    });
+
     try {
       // 🌐 ONLINE: සර්වර් එකට දත්ත යැවීමට උත්සාහ කරයි
       const checkoutResponse = await axios.post(`${API_BASE_URL}/products/checkout`, checkoutData);
 
-      // 🆕 සර්වරයෙන් ආපු Professional Invoice Number එක Receipt එකේ Print කරන්න Save කරගන්නවා
-      // 🛠️ flushSync භාවිතා කරන්නේ React State එක Print කරන්න කලින්ම DOM එකට Force කරලා update කරන්න -
-      //     නැත්නම් window.print() එක State update එක DOM එකට එන්න කලින් Run වෙලා "N/A" පෙන්නයි!
-      flushSync(() => {
-        setLastInvoiceNo(checkoutResponse.data.invoiceNo || null);
-        setLastSaleIsOffline(false);
-      });
-
-      window.print();
+      // 🆕 auto-print කරනවා වෙනුවට, "Sale Complete" modal එකක් පෙන්නලා cashier ට තීරණය කරන්න
+      // ඉඩ දෙනවා - Print කරනවද, නැත්නම් කෙලින්ම ඊළඟ බිලට යනවද.
+      const completedSale = buildSaleSnapshot(checkoutResponse.data.invoiceNo || null, false);
+      setLastCompletedSale(completedSale);
+      setShowSaleCompleteModal(true);
+      // 🆕 Print කරේවත් නැතත්, මේ bill එකම "Recent Bills" queue එකටත් එකතු කරයි - පස්සේ ඕන වෙලාවක print කරගන්න
+      setRecentBills((prev) => pruneRecentBills([completedSale, ...prev]));
       resetBillingUI();
-      showToast("ඉන්වොයිසිය සාර්ථකව මුද්‍රණය කලා! 🖨️✨");
       fetchProducts();
       fetchCustomers();
       // 🛠️ FIX: Checkout එකට පස්සේ Sales Summary එකත් Refresh කරයි - Unregistered Items tab, Sales Logs,
@@ -1031,12 +1273,10 @@ useEffect(() => {
           });
 
           // 🆕 Offline බිලකට තාවකාලික Reference එකක් පමණි - Sync වුනාට පස්සේ විතරක් සැබෑ Invoice Number එකක් ලැබෙන්නේ
-          flushSync(() => {
-            setLastInvoiceNo(`OFFLINE-${Date.now()}`);
-            setLastSaleIsOffline(true);
-          });
-
-          window.print(); 
+          const offlineCompletedSale = buildSaleSnapshot(`OFFLINE-${Date.now()}`, true);
+          setLastCompletedSale(offlineCompletedSale);
+          setShowSaleCompleteModal(true);
+          setRecentBills((prev) => pruneRecentBills([offlineCompletedSale, ...prev]));
           resetBillingUI();
           showToast("⚠️ ඉන්ටර්නෙට් නොමැත! බිල ආරක්ෂිතව බ්‍රවුසර් එකේ සේව් කලා. 📴", "warning");
           
@@ -1047,6 +1287,96 @@ useEffect(() => {
         showToast("Checkout අසාර්ථකයි!", "error");
       }
     }
+  };
+
+  // 🆕 cashier ඕන වෙලාවක අන්තිමට sold කරපු bill එකේ receipt එක print කරගන්න - checkout එකේදී
+  // auto-print නොකරන නිසා, මේකම තමයි print කරන එකම ක්‍රමය (Sale Complete modal එකේ "Print" button
+  // එකෙන්, හෝ Billing screen එකේ "Reprint" button එකෙන් දෙකෙන්ම මේකම call කරයි).
+  const handlePrintReceipt = () => {
+    if (!lastCompletedSale) return showToast("Print කරන්න Bill එකක් නෑ!", "warning");
+    // 🛠️ flushSync: print කරන්න කලින්ම receipt එකේ DOM එක render වෙලා ඉවර බව සහතික කරගන්නවා
+    flushSync(() => { setShowSaleCompleteModal(false); });
+    window.print();
+    // 🆕 Recent Bills queue එකේත් "printed" කියලා mark කරයි
+    setRecentBills((prev) => prev.map((b) => (b.id === lastCompletedSale.id ? { ...b, printed: true } : b)));
+  };
+
+  // 🆕 RECENT BILLS QUEUE එකෙන් specific bill එකක් print කරගන්න - "last completed" එක විතරක් නෙවෙයි,
+  // මීට පෙර print නොකරපු (හෝ reprint කරන්න ඕන) ඕනම පැරණි bill එකක් මෙතනින් print කරගන්න පුළුවන්.
+  const handlePrintRecentBill = (billId) => {
+    const bill = recentBills.find((b) => b.id === billId);
+    if (!bill) return;
+    flushSync(() => {
+      setLastCompletedSale(bill);
+      setShowSaleCompleteModal(false);
+      setShowRecentBillsPanel(false);
+    });
+    window.print();
+    setRecentBills((prev) => prev.map((b) => (b.id === billId ? { ...b, printed: true } : b)));
+  };
+
+  // 🆕 HOLD BILL: වත්මන් cart එක (customer, payment prefs ඇතුලුව) Hold කරලා, අලුත් හිස් බිලක්
+  // ආරම්භ කරයි. Hold කරපු බිල "Held" panel එකෙන් ඕන වෙලාවක නැවත ගේන්න පුළුවන්.
+  const handleHoldBill = () => {
+    if (cart.length === 0) return showToast("හිස් බිලක් Hold කරන්න බෑ!", "warning");
+    const held = {
+      id: `hold_${Date.now()}`,
+      heldAt: new Date().toISOString(),
+      cart,
+      selectedCustomer,
+      paymentMethod,
+      cashReceived,
+      amountPaid,
+      appliedBillDiscount,
+      label: selectedCustomer?.name || `Items ${cart.length}ක් සහිත බිලක්`
+    };
+    setHeldBills((prev) => [held, ...prev]);
+    resetBillingUI();
+    showToast(`බිල Hold කලා! 📌 අලුත් බිලක් දාන්න පුළුවන් දැන්.`);
+  };
+
+  // 🆕 RESUME HELD BILL: Hold කරපු බිලක් cart එකට නැවත ගේනවා. වත්මන් cart එකේ දැනටමත් items
+  // තියෙනවනම් (cashier අතරමැදදී වෙනත් items දාලා තියෙනවනම්), ඒකත් discard නොකර auto-hold කරලා
+  // replace කරයි - cashier ගේ වැඩ කිසිවක් silently නැති වෙන්නේ නෑ.
+  const handleResumeHeldBill = (heldId) => {
+    const target = heldBills.find((h) => h.id === heldId);
+    if (!target) return;
+
+    setHeldBills((prev) => {
+      let next = prev.filter((h) => h.id !== heldId);
+      if (cart.length > 0) {
+        next = [{
+          id: `hold_${Date.now()}`,
+          heldAt: new Date().toISOString(),
+          cart, selectedCustomer, paymentMethod, cashReceived, amountPaid, appliedBillDiscount,
+          label: selectedCustomer?.name || `Items ${cart.length}ක් සහිත බිලක්`
+        }, ...next];
+      }
+      return next;
+    });
+
+    setCart(target.cart);
+    setSelectedCustomer(target.selectedCustomer);
+    setPaymentMethod(target.paymentMethod);
+    setCashReceived(target.cashReceived);
+    setAmountPaid(target.amountPaid);
+    setAppliedBillDiscount(target.appliedBillDiscount);
+    setShowHeldBillsPanel(false);
+    showToast(cart.length > 0 ? "බිල නැවත ගෙනාවා! ▶️ (පරණ බිල Hold කලා)" : "බිල නැවත ගෙනාවා! ▶️");
+  };
+
+  // 🆕 DELETE HELD BILL: Hold කරපු බිලක් සම්පූර්ණයෙන්ම ඉවත් කිරීම (customer ආයෙත් එන්නේ නෑ කියලා
+  // තීරණය කලොත් වගේ අවස්ථාවක) - confirm dialog එකක් එක්ක, වැරදීමකින් delete වෙන එක වළක්වන්න.
+  const handleDeleteHeldBill = async (heldId) => {
+    const confirmed = await askConfirm({
+      title: "Hold කරපු බිල ඉවත් කිරීම",
+      message: "මෙම Hold කරපු බිල සම්පූර්ණයෙන්ම ඉවත් කරන්නද? මේක ආපසු ගන්න බෑ.",
+      tone: "danger",
+      confirmLabel: "ඉවත් කරන්න",
+      cancelLabel: "නවත්වන්න",
+    });
+    if (!confirmed) return;
+    setHeldBills((prev) => prev.filter((h) => h.id !== heldId));
   };
 
   // UI එක Reset කරන Helper Function එක (handleCheckoutAndPrint එකට යටින් දාන්න)
@@ -1272,6 +1602,10 @@ useEffect(() => {
         
         // 🛠️ UPDATED: සාර්ථකව ලොගින් වූ පසු බ්‍රවුසර් මෙමරියේ සේව් කරයි
         localStorage.setItem("pos_user", JSON.stringify(response.data.user));
+        // 🔐 AUTH: token එකත් save කරලා, මෙතැන් සිට යවන හැම axios request එකකටම automatic ව attach කරයි
+        localStorage.setItem("pos_token", response.data.token);
+        axios.defaults.headers.common["Authorization"] = `Bearer ${response.data.token}`;
+        sessionStorage.removeItem("pos_session_expired_reload"); // fresh login - re-arm the 401 guard
 
         if (response.data.user.role === "cashier") setActiveTab("billing");
         setTimeout(() => showToast(`සුභ දවසක් ${response.data.user.username}! 👋`), 300);
@@ -1354,7 +1688,7 @@ useEffect(() => {
       marketPrice: product.marketPrice || "",
       price: product.price,
       costPrice: product.costPrice || "",
-      stock: product.stock,
+      stock: getTotalStock(product), // 🛠️ FIX: sum of batches when present, not the raw field (which could be stale)
       barcode: product.barcode || "",
       discountPercent: product.discount || "", 
       unit: product.unit ?? "Kg",
@@ -1366,6 +1700,10 @@ useEffect(() => {
     });
     setShowNewPriceEntry(false);
     setNewPriceEntry({ price: "", qty: "", costPrice: "", discount: "" });
+    // 🛠️ FIX: the form lives at the top of the page while the product list is
+    // further down — clicking Edit was only updating the form's data, never
+    // actually bringing it into view, so admins had to scroll up manually.
+    productFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
   // 🆕 MULTI-PRICE (Simplified): "අලුතින් Stock ලැබුනා, මිලත් වෙනස්" කියන එකම action එකෙන් Batches Auto-සාදයි.
@@ -1606,7 +1944,7 @@ useEffect(() => {
   );
 
   // 🛠️ NEW (Step 3 - Low Stock Reorder Alert): අවම තොග මට්ටමට වඩා අඩු Products ලැයිස්තුව
-  const lowStockProducts = products.filter(p => p.stock <= (p.minStockLevel ?? 5));
+  const lowStockProducts = products.filter(p => getTotalStock(p) <= (p.minStockLevel ?? 5));
   const activeCustomerDetails = viewCustomerDetails ? customers.find(c => c._id === viewCustomerDetails) : null;
 
   // 🛠️ NEW: Low stock products, Preferred Supplier එක අනුව group කිරීම (Purchase Order Suggestion සඳහා)
@@ -1620,7 +1958,7 @@ useEffect(() => {
   // 🛠️ NEW: Product එකකට Suggested Reorder Quantity එක ගණනය කිරීම (අවම මට්ටමෙන් දෙගුණයකට ළඟා වෙන්න ඕන ප්‍රමාණය)
   const getSuggestedReorderQty = (p) => {
     const min = p.minStockLevel ?? 5;
-    const suggestion = (min * 2) - p.stock;
+    const suggestion = (min * 2) - getTotalStock(p);
     return suggestion > 0 ? suggestion : min;
   };
 
@@ -1840,6 +2178,163 @@ useEffect(() => {
                 }`}
               >
                 {dialogRequest.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════ 🆕 HELD BILLS PANEL ══════════ */}
+      {showHeldBillsPanel && (
+        <div
+          className="fixed inset-0 z-100 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm print:hidden"
+          onClick={() => setShowHeldBillsPanel(false)}
+        >
+          <div
+            className="w-full max-w-md max-h-[80vh] bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 bg-linear-to-r from-indigo-600 to-indigo-700 flex items-center justify-between">
+              <h3 className="text-sm font-black text-white">📋 Hold කරපු බිල් ({heldBills.length})</h3>
+              <button onClick={() => setShowHeldBillsPanel(false)} className="text-white/80 hover:text-white text-lg leading-none">✕</button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
+              {heldBills.length === 0 && (
+                <p className="text-xs text-gray-400 text-center py-8">Hold කරපු බිල් නෑ</p>
+              )}
+              {heldBills.map((h) => {
+                const heldTotal = h.cart.reduce((sum, item) => {
+                  const discP = parseFloat(item.discountPercent || item.discount) || 0;
+                  const p = parseFloat(item.price);
+                  return sum + ((p - (p * discP) / 100) * (parseFloat(item.qty) || 0));
+                }, 0);
+                return (
+                  <div key={h.id} className="p-3 rounded-lg border border-indigo-200 bg-indigo-50 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-[13px] font-700 text-indigo-900 truncate">{h.label}</p>
+                      <p className="text-[11px] text-indigo-600">{h.cart.length} Items • රු. {heldTotal.toFixed(2)} • {new Date(h.heldAt).toLocaleTimeString()}</p>
+                    </div>
+                    <div className="flex gap-1.5 shrink-0">
+                      <button
+                        onClick={() => handleResumeHeldBill(h.id)}
+                        className="px-3 py-1.5 rounded-lg text-[11px] font-700 text-white bg-indigo-600 hover:bg-indigo-700 transition-colors"
+                      >
+                        ▶️ Resume
+                      </button>
+                      <button
+                        onClick={() => handleDeleteHeldBill(h.id)}
+                        className="px-2.5 py-1.5 rounded-lg text-[11px] font-700 text-crimson bg-crimson-soft hover:brightness-95 transition-colors"
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════ 🆕 RECENT BILLS QUEUE — reprint any bill, printed or not, from this device ══════════ */}
+      {showRecentBillsPanel && (
+        <div
+          className="fixed inset-0 z-100 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm print:hidden"
+          onClick={() => setShowRecentBillsPanel(false)}
+        >
+          <div
+            className="w-full max-w-md max-h-[80vh] bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 bg-linear-to-r from-slate-800 to-slate-900 flex items-center justify-between">
+              <h3 className="text-sm font-black text-white">🧾 Bills - Print කරගන්න</h3>
+              <button onClick={() => setShowRecentBillsPanel(false)} className="text-white/80 hover:text-white text-lg leading-none">✕</button>
+            </div>
+
+            {/* Filter tabs */}
+            <div className="flex gap-1.5 p-3 border-b border-slate-100 bg-slate-50">
+              <button
+                onClick={() => setRecentBillsFilter("unprinted")}
+                className={`flex-1 py-1.5 rounded-lg text-[11.5px] font-700 transition-colors ${
+                  recentBillsFilter === "unprinted" ? "bg-slate-900 text-white" : "bg-white text-slate-500 border border-slate-200"
+                }`}
+              >
+                🕓 Print නොකල ({recentBills.filter((b) => !b.printed).length})
+              </button>
+              <button
+                onClick={() => setRecentBillsFilter("all")}
+                className={`flex-1 py-1.5 rounded-lg text-[11.5px] font-700 transition-colors ${
+                  recentBillsFilter === "all" ? "bg-slate-900 text-white" : "bg-white text-slate-500 border border-slate-200"
+                }`}
+              >
+                සියල්ල ({recentBills.length})
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
+              {(() => {
+                const list = recentBillsFilter === "unprinted" ? recentBills.filter((b) => !b.printed) : recentBills;
+                if (list.length === 0) {
+                  return (
+                    <p className="text-xs text-gray-400 text-center py-8">
+                      {recentBillsFilter === "unprinted" ? "Print නොකල bill නෑ 🎉" : "තවම bill කිසිවක් සටහන් වී නැත"}
+                    </p>
+                  );
+                }
+                return list.map((b) => (
+                  <div key={b.id} className={`p-3 rounded-lg border flex items-center justify-between gap-2 ${
+                    b.printed ? "bg-slate-50 border-slate-200" : "bg-amber-50 border-amber-200"
+                  }`}>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-[13px] font-700 text-slate-800 truncate">{b.invoiceNo || "N/A"}</p>
+                        {b.isOffline && <span className="text-[9px] px-1 py-0.5 rounded bg-orange-200 text-orange-800 font-bold">OFFLINE</span>}
+                        {b.printed ? (
+                          <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-200 text-emerald-800 font-bold">✅ Printed</span>
+                        ) : (
+                          <span className="text-[9px] px-1 py-0.5 rounded bg-amber-200 text-amber-800 font-bold">🕓 Not printed</span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-500">
+                        රු. {b.total.toFixed(2)} • {b.items.length} Items • {new Date(b.date).toLocaleString()}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handlePrintRecentBill(b.id)}
+                      className="px-3 py-1.5 rounded-lg text-[11px] font-700 text-white bg-slate-900 hover:bg-slate-800 transition-colors shrink-0"
+                    >
+                      🖨️ Print
+                    </button>
+                  </div>
+                ));
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════ 🆕 SALE COMPLETE — print only if needed ══════════ */}
+      {showSaleCompleteModal && lastCompletedSale && (
+        <div className="fixed inset-0 z-100 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm print:hidden">
+          <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-[fadeIn_0.15s_ease-out]">
+            <div className="px-5 py-5 bg-linear-to-r from-emerald-600 to-emerald-700 text-center">
+              <div className="w-12 h-12 mx-auto rounded-full bg-white/15 flex items-center justify-center text-2xl mb-2">✅</div>
+              <h3 className="text-base font-black text-white">බිල සාර්ථකයි!</h3>
+              <p className="text-[12px] text-emerald-50 mt-0.5">{lastCompletedSale.invoiceNo}</p>
+              <p className="text-xl font-black text-white mt-1">රු. {lastCompletedSale.total.toFixed(2)}</p>
+            </div>
+            <div className="p-4 flex flex-col gap-2">
+              <button
+                onClick={handlePrintReceipt}
+                className="w-full py-3 rounded-xl text-sm font-black text-white bg-slate-900 hover:bg-slate-800 transition-colors flex items-center justify-center gap-2"
+              >
+                🖨️ Receipt එක Print කරන්න
+              </button>
+              <button
+                onClick={() => setShowSaleCompleteModal(false)}
+                className="w-full py-2.5 rounded-xl text-sm font-700 text-slate-500 hover:bg-slate-100 transition-colors"
+              >
+                Print එපා, ඊළඟ බිලට යන්න ➡️
               </button>
             </div>
           </div>
@@ -2079,7 +2574,6 @@ useEffect(() => {
                     {(paymentMethod === "Card" || paymentMethod === "QR") && (
                       <div className="rounded-xl border border-line bg-sunken px-4 py-6 text-center">
                         <p className="text-[13.5px] font-600 text-body">Charge the full amount on the terminal</p>
-                        <p className="text-[12px] text-muted mt-1">සම්පූර්ණ මුදල පර්යන්තය හරහා අය කරන්න</p>
                       </div>
                     )}
 
@@ -2124,7 +2618,7 @@ useEffect(() => {
                         {selectedCustomer && (
                           <div className="flex items-center justify-between px-3.5 py-2.5 rounded-xl border border-accent bg-accent-soft">
                             <span className="text-[12.5px] font-700 text-body">{selectedCustomer.name}</span>
-                            <span className="tnum text-[11.5px] font-700 text-crimson">owes රු {parseFloat(selectedCustomer.creditBalance || 0).toFixed(2)}</span>
+                            <span className="tnum text-[11.5px] font-700 text-crimson"> රු {parseFloat(selectedCustomer.creditBalance || 0).toFixed(2)}</span>
                           </div>
                         )}
 
@@ -2150,7 +2644,7 @@ useEffect(() => {
                         {paymentMethod === "Cash"
                           ? (short ? "STILL SHORT · තව ගෙවිය යුතුයි" : "CHANGE DUE · ඉතිරි මුදල")
                           : paymentMethod === "Credit" ? "GOES ON ACCOUNT · ණයට"
-                            : "CHARGE ON TERMINAL · පර්යන්තයෙන්"}
+                            : "CHARGE ON TERMINAL"}
                       </p>
                       <p className="mt-1.5 flex items-baseline gap-1.5">
                         <span className="text-[16px] font-600 text-white/55">රු</span>
@@ -2217,7 +2711,12 @@ useEffect(() => {
             <span className="text-white/25">|</span>
             <span className="text-white/80 font-500">{user.username}</span>
             <button
-              onClick={() => { localStorage.removeItem("pos_user"); setUser(null); }}
+              onClick={() => {
+                localStorage.removeItem("pos_user");
+                localStorage.removeItem("pos_token"); // 🔐 AUTH: token එකත් clear කරන්න ඕන, නැත්තම් sign out කරලත් old token එකෙන්ම requests යනවා
+                delete axios.defaults.headers.common["Authorization"];
+                setUser(null);
+              }}
               className="h-7 px-2.5 rounded-md text-[12px] font-600 text-white/55 hover:text-white hover:bg-crimson transition-colors"
             >
               Sign out
@@ -2278,6 +2777,26 @@ useEffect(() => {
                     Quick item <kbd className="text-[10px] opacity-60 font-700">F4</kbd>
                   </button>
 
+                  {/* 🆕 HOLD BILL: වත්මන් cart එක Hold කරලා, අලුත් හිස් බිලක් පටන් ගන්න */}
+                  <button
+                    onClick={handleHoldBill}
+                    disabled={cart.length === 0}
+                    title="මේ බිල Hold කරලා අලුත් බිලක් දාන්න"
+                    className="h-9.5 px-3 rounded-lg border border-line text-[12.5px] font-600 text-indigo-600 bg-indigo-50 hover:brightness-97 disabled:opacity-35 disabled:pointer-events-none transition-all flex items-center gap-1.5 shrink-0"
+                  >
+                    📌 Hold
+                  </button>
+
+                  {/* 🆕 HELD BILLS: Hold කරපු බිල් ගණන පෙන්වලා, click කලාම ඒවා බලන්න/නැවත ගේන්න panel එක */}
+                  {heldBills.length > 0 && (
+                    <button
+                      onClick={() => setShowHeldBillsPanel(true)}
+                      className="h-9.5 px-3 rounded-lg border border-indigo-300 text-[12.5px] font-700 text-white bg-indigo-600 hover:bg-indigo-700 transition-all flex items-center gap-1.5 shrink-0"
+                    >
+                      📋 Held ({heldBills.length})
+                    </button>
+                  )}
+
                   <button
                     onClick={() => { setCart([]); showToast("බිල හිස් කලා"); }}
                     disabled={cart.length === 0}
@@ -2285,6 +2804,22 @@ useEffect(() => {
                   >
                     Clear
                   </button>
+
+                  {/* 🆕 BILLS QUEUE: Print කරපු/නොකරපු සියලුම bill - Print නොකරපු ගණන badge එකේ පේනවා */}
+                  {recentBills.length > 0 && (
+                    <button
+                      onClick={() => { setRecentBillsFilter("unprinted"); setShowRecentBillsPanel(true); }}
+                      title="Bill History - Print කරගන්න"
+                      className="relative h-9.5 px-3 rounded-lg border border-line text-[12.5px] font-600 text-muted hover:text-ink hover:bg-sunken transition-all flex items-center gap-1.5 shrink-0"
+                    >
+                      🧾 Bills
+                      {recentBills.some((b) => !b.printed) && (
+                        <span className="min-w-4.5 h-4.5 px-1 rounded-full bg-crimson text-white text-[10px] font-black flex items-center justify-center">
+                          {recentBills.filter((b) => !b.printed).length}
+                        </span>
+                      )}
+                    </button>
+                  )}
                 </div>
 
                 {/* Column headers — encode the row grid */}
@@ -2486,21 +3021,24 @@ useEffect(() => {
                       ) : catalogProducts.map((product) => {
                         const discP = parseFloat(product.discount) || 0;
                         const finalPrice = product.price - (product.price * discP) / 100;
-                        const isLowStock = product.stock <= (product.minStockLevel ?? 5);
+                        const totalStock = getTotalStock(product); // 🛠️ FIX: sum of batches when present, not the raw (sometimes stale) product.stock field
+                        const isOutOfStock = totalStock <= 0; // 🆕 distinct from "low" — this one blocks the sale
+                        const isLowStock = !isOutOfStock && totalStock <= (product.minStockLevel ?? 5);
                         const expStatus = getExpiryStatus(product);
                         const dead = expStatus === "expired";
                         const soon = expStatus === "expiring";
                         const batchCount = getActivePriceBatches(product).length;
+                        const blocked = dead || isOutOfStock; // 🆕 can't be sold either way — tile is disabled
 
                         /* Status rides a 3px left bar, not a pulsing ring */
-                        const bar = dead ? "bg-faint" : isLowStock ? "bg-crimson" : soon ? "bg-gold" : "bg-transparent";
+                        const bar = dead ? "bg-faint" : isOutOfStock ? "bg-crimson" : isLowStock ? "bg-gold" : soon ? "bg-gold" : "bg-transparent";
 
                         return (
                           <button
                             key={product._id}
-                            disabled={dead}
+                            disabled={blocked}
                             onClick={() => addToCart(product)}
-                            className={`relative overflow-hidden text-left p-2 pl-2.5 rounded-lg border bg-card transition-all h-21 flex flex-col justify-between ${dead ? "border-line opacity-45 cursor-not-allowed" : "border-line hover:border-accent hover:bg-accent-soft active:scale-[.98]"}`}
+                            className={`relative overflow-hidden text-left p-2 pl-2.5 rounded-lg border bg-card transition-all h-21 flex flex-col justify-between ${blocked ? "border-line opacity-45 cursor-not-allowed" : "border-line hover:border-accent hover:bg-accent-soft active:scale-[.98]"}`}
                           >
                             <span className={`absolute left-0 top-0 bottom-0 w-0.75 ${bar}`}></span>
                             <div className="flex items-start justify-between gap-1">
@@ -2509,14 +3047,15 @@ useEffect(() => {
                             </div>
                             <div>
                               <div className="flex items-baseline gap-1">
-                                <span className={`tnum text-[14px] font-800 ${dead ? "text-faint line-through" : "text-accent"}`}>{finalPrice.toFixed(2)}</span>
+                                <span className={`tnum text-[14px] font-800 ${blocked ? "text-faint line-through" : "text-accent"}`}>{finalPrice.toFixed(2)}</span>
                                 {discP > 0 && <span className="tnum text-[10px] font-600 text-faint line-through">{parseFloat(product.price).toFixed(2)}</span>}
                               </div>
-                              <div className={`tnum text-[10px] font-600 mt-0.5 truncate ${isLowStock ? "text-crimson" : soon ? "text-gold" : "text-faint"}`}>
+                              <div className={`tnum text-[10px] font-700 mt-0.5 truncate ${isOutOfStock ? "text-crimson" : isLowStock ? "text-gold" : soon ? "text-gold" : "text-faint"}`}>
                                 {dead ? "Expired"
-                                  : isLowStock ? `Low · ${formatQtyWithUnit(product.stock, product.unit ?? "Kg")}`
+                                  : isOutOfStock ? "Out of stock"
+                                  : isLowStock ? `Low · ${formatQtyWithUnit(totalStock, product.unit ?? "Kg")}`
                                   : soon ? `Expires ${new Date(product.expiryDate).toLocaleDateString()}`
-                                  : `${formatQtyWithUnit(product.stock, product.unit ?? "Kg")} left`}
+                                  : `${formatQtyWithUnit(totalStock, product.unit ?? "Kg")} left`}
                               </div>
                             </div>
                           </button>
@@ -2811,7 +3350,7 @@ useEffect(() => {
                 {adminSubTab === "products" && (
                   <div className="space-y-6">
                     {/* Add/Edit Form */}
-                    <div className="bg-white p-5 rounded-xl border shadow-xs">
+                    <div ref={productFormRef} className="bg-white p-5 rounded-xl border shadow-xs">
                       <h3 className="text-sm font-black uppercase text-slate-800 mb-4">{isEditing ? "🔄 භාණ්ඩයේ විස්තර වෙනස් කිරීම" : "➕ අලුත් භාණ්ඩයක් ඇතුලත් කිරීම"}</h3>
                       <form onSubmit={handleFormSubmit} className="grid grid-cols-2 md:grid-cols-4 gap-4">
                         <div>
@@ -3005,7 +3544,7 @@ useEffect(() => {
                               <td className="p-3 text-right text-gray-500">රු. {p.marketPrice?.toFixed(2) || p.price?.toFixed(2)}</td>
                               <td className="p-3 text-right font-black text-blue-600">රු. {p.price.toFixed(2)}</td>
                               <td className="p-3 text-right text-emerald-700">රු. {p.costPrice?.toFixed(2) || "0.00"}</td>
-                              <td className="p-3 text-center font-black"><span className={`px-2 py-0.5 rounded-sm ${p.stock > (p.minStockLevel ?? 5) ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600'}`}>{formatQtyWithUnit(p.stock, p.unit ?? 'Kg')}</span></td>
+                              <td className="p-3 text-center font-black"><span className={`px-2 py-0.5 rounded-sm ${getTotalStock(p) > (p.minStockLevel ?? 5) ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600'}`}>{formatQtyWithUnit(getTotalStock(p), p.unit ?? 'Kg')}</span></td>
                               <td className="p-3 text-center text-red-500 font-bold">{p.discount || 0}% OFF</td>
                               <td className="p-3 text-center">
                                 {p.expiryDate ? (
@@ -3068,7 +3607,7 @@ useEffect(() => {
                                 {productsGroup.map((p) => (
                                   <tr key={p._id} className="hover:bg-red-50/40">
                                     <td className="p-3 font-bold text-slate-900">{p.name}</td>
-                                    <td className="p-3 text-center"><span className="bg-red-100 text-red-600 px-2 py-0.5 rounded-full font-black">{formatQtyWithUnit(p.stock, p.unit ?? "Kg")}</span></td>
+                                    <td className="p-3 text-center"><span className="bg-red-100 text-red-600 px-2 py-0.5 rounded-full font-black">{formatQtyWithUnit(getTotalStock(p), p.unit ?? "Kg")}</span></td>
                                     <td className="p-3 text-center text-gray-500">{formatQtyWithUnit(p.minStockLevel ?? 5, p.unit ?? "Kg")}</td>
                                     <td className="p-3 text-center font-black text-emerald-700">{formatQtyWithUnit(getSuggestedReorderQty(p), p.unit ?? "Kg")}</td>
                                   </tr>
@@ -3110,7 +3649,7 @@ useEffect(() => {
                             {expiringProducts.map((p) => (
                               <tr key={p._id} className={p.expiryStatus === "expired" ? "bg-red-50/60" : "bg-amber-50/40"}>
                                 <td className="p-3 font-bold text-slate-900">{p.name}</td>
-                                <td className="p-3 text-center">{formatQtyWithUnit(p.stock, p.unit ?? "Kg")}</td>
+                                <td className="p-3 text-center">{formatQtyWithUnit(getTotalStock(p), p.unit ?? "Kg")}</td>
                                 <td className="p-3 text-center font-bold">{new Date(p.expiryDate).toLocaleDateString()}</td>
                                 <td className="p-3 text-center">
                                   <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${p.expiryStatus === "expired" ? "bg-red-600 text-white" : "bg-amber-400 text-amber-950"}`}>
@@ -3246,7 +3785,18 @@ useEffect(() => {
                         </div>
                         <div>
                           <label className="text-[11px] font-bold text-gray-600 block mb-1">දුරකථන අංකය:</label>
-                          <input type="text" required value={customerForm.phone} onChange={(e) => setCustomerForm({ ...customerForm, phone: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white" />
+                          <input
+                            type="tel"
+                            inputMode="tel"
+                            required
+                            value={customerForm.phone}
+                            onChange={(e) => setCustomerForm({ ...customerForm, phone: e.target.value })}
+                            placeholder="0771234567"
+                            className={`w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white ${customerForm.phone && !isValidPhone(customerForm.phone) ? "border-red-400 focus:border-red-500" : ""}`}
+                          />
+                          {customerForm.phone !== "" && !isValidPhone(customerForm.phone) && (
+                            <p className="text-[10px] text-red-600 font-bold mt-1">නිවැරදි දුරකථන අංකයක් නොවේ (උදා: 0771234567)</p>
+                          )}
                         </div>
                         <button type="submit" className="w-full bg-blue-600 text-white py-2 rounded text-xs font-bold shadow-md">{isEditingCustomer ? "යාවත්කාලීන කරන්න" : "ගිණුම සාදන්න"}</button>
                       </form>
@@ -3383,7 +3933,18 @@ useEffect(() => {
                           </div>
                           <div>
                             <label className="text-[11px] font-bold text-gray-600 block mb-1">දුරකථන අංකය:</label>
-                            <input type="text" required value={supplierForm.phone} onChange={(e) => setSupplierForm({ ...supplierForm, phone: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white" />
+                            <input
+                              type="tel"
+                              inputMode="tel"
+                              required
+                              value={supplierForm.phone}
+                              onChange={(e) => setSupplierForm({ ...supplierForm, phone: e.target.value })}
+                              placeholder="0771234567"
+                              className={`w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white ${supplierForm.phone && !isValidPhone(supplierForm.phone) ? "border-red-400 focus:border-red-500" : ""}`}
+                            />
+                            {supplierForm.phone !== "" && !isValidPhone(supplierForm.phone) && (
+                              <p className="text-[10px] text-red-600 font-bold mt-1">නිවැරදි දුරකථන අංකයක් නොවේ (උදා: 0771234567)</p>
+                            )}
                           </div>
                           <div>
                             <label className="text-[11px] font-bold text-gray-600 block mb-1">ලිපිනය (Optional):</label>
@@ -3426,7 +3987,7 @@ useEffect(() => {
                             >
                               <option value="">භාණ්ඩය තෝරන්න...</option>
                               {products.map(p => (
-                                <option key={p._id} value={p._id}>{p.name} (වත්මන් තොගය: {formatQtyWithUnit(p.stock, p.unit ?? "Kg")})</option>
+                                <option key={p._id} value={p._id}>{p.name} (වත්මන් තොගය: {formatQtyWithUnit(getTotalStock(p), p.unit ?? "Kg")})</option>
                               ))}
                             </select>
 
@@ -3595,6 +4156,19 @@ useEffect(() => {
                       <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
                         <h4 className="text-[10px] font-black uppercase text-gray-400 mb-1">ගණුදෙනු ඉතිහාසය (Transaction History)</h4>
 
+                        {/* 🆕 CASHBACK SUMMARY: මේ supplier ගෙන් දැනට කොච්චර cashback (අපි වැඩියෙන් ගෙවලා, ආපසු
+                            ලැබුණු) මුදලක් තියෙනවද කියලා top එකේම එකවර පේන්න */}
+                        {(() => {
+                          const totalCashback = (viewSupplierDetails.ledger || []).reduce((sum, e) => sum + (e.changeGiven || 0), 0);
+                          if (totalCashback <= 0) return null;
+                          return (
+                            <div className="p-2.5 rounded-lg bg-orange-50 border border-orange-200 flex justify-between items-center mb-2">
+                              <span className="text-[11px] font-bold text-orange-700">🔄 මුළු Cashback (වැඩියෙන් ගෙවූ, ආපසු ලැබුණු මුදල):</span>
+                              <span className="text-sm font-black text-orange-700">රු. {totalCashback.toFixed(2)}</span>
+                            </div>
+                          );
+                        })()}
+
                         {(!viewSupplierDetails.ledger || viewSupplierDetails.ledger.length === 0) && (
                           <p className="text-xs text-gray-400 text-center py-8">තවම ගණුදෙනු කිසිවක් සටහන් වී නැත</p>
                         )}
@@ -3624,6 +4198,14 @@ useEffect(() => {
 
                               {entry.description && (
                                 <p className="text-[11px] text-gray-600 mt-1.5 italic">{entry.description}</p>
+                              )}
+
+                              {/* 🆕 CASHBACK BADGE */}
+                              {entry.changeGiven > 0 && (
+                                <div className="mt-2 px-2 py-1.5 rounded bg-orange-100 border border-orange-300 flex justify-between items-center">
+                                  <span className="text-[10px] font-bold text-orange-800">🔄 ආපසු ලැබුණු මුදල (Cashback)</span>
+                                  <span className="text-[12px] font-black text-orange-800">රු. {entry.changeGiven.toFixed(2)}</span>
+                                </div>
                               )}
 
                               {/* Purchase items breakdown */}
@@ -3672,6 +4254,19 @@ useEffect(() => {
       <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
         <h4 className="text-[10px] font-black uppercase text-gray-400 mb-1">ණය ගණුදෙනු ඉතිහාසය (Credit History)</h4>
 
+        {/* 🆕 CASHBACK SUMMARY: මේ customer ට දැනට කොච්චර cashback (overpayment) ආපසු දීලා තියෙනවද කියලා
+            top එකේම එකවර පේන්න - description text එක ඇතුලේ හොයගෙන යන්න ඕන නෑ */}
+        {(() => {
+          const totalCashback = (activeCustomerDetails.creditHistory || []).reduce((sum, e) => sum + (e.changeGiven || 0), 0);
+          if (totalCashback <= 0) return null;
+          return (
+            <div className="p-2.5 rounded-lg bg-orange-50 border border-orange-200 flex justify-between items-center mb-2">
+              <span className="text-[11px] font-bold text-orange-700">🔄 මුළු Cashback (ණයට වඩා ගෙවූ, ආපසු දුන් මුදල):</span>
+              <span className="text-sm font-black text-orange-700">රු. {totalCashback.toFixed(2)}</span>
+            </div>
+          );
+        })()}
+
         {(!activeCustomerDetails.creditHistory || activeCustomerDetails.creditHistory.length === 0) && (
           <p className="text-xs text-gray-400 text-center py-8">තවම ණය ගණුදෙනු කිසිවක් සටහන් වී නැත</p>
         )}
@@ -3694,6 +4289,15 @@ useEffect(() => {
                   </span>
                 </div>
                 {entry.description && <p className="text-[11px] text-gray-600 mt-1.5 italic">{entry.description}</p>}
+
+                {/* 🆕 CASHBACK BADGE: description එකේ කුඩා italic text එකක් විදිහට විතරක් නෙවෙයි,
+                    clearly highlight වෙන badge එකක් විදිහටම cashback ගණන පෙන්වයි */}
+                {entry.changeGiven > 0 && (
+                  <div className="mt-2 px-2 py-1.5 rounded bg-orange-100 border border-orange-300 flex justify-between items-center">
+                    <span className="text-[10px] font-bold text-orange-800">🔄 ආපසු දුන් මුදල (Cashback)</span>
+                    <span className="text-[12px] font-black text-orange-800">රු. {entry.changeGiven.toFixed(2)}</span>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -3715,9 +4319,18 @@ useEffect(() => {
                     <div className="bg-white rounded-xl border shadow-xs overflow-hidden">
                       <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
                         <h3 className="text-xs font-black uppercase text-slate-800">📊 දිනපතා සිදුකල විකුණුම් ඉතිහාසය (Sales Logs)</h3>
-                        {salesSummary.sales?.length > 0 && (
-                          <button onClick={handleClearAllSales} className="bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 px-3 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all">🧹 සියල්ල ඉවත් කරන්න</button>
-                        )}
+                        <div className="flex items-center gap-3">
+                          {/* 🆕 Voided sales stay chronological (not moved to the bottom) — this toggle
+                              hides them by default so they don't clutter day-to-day scanning, but keeps
+                              them one click away, in their correct time order, for the audit trail. */}
+                          <label className="flex items-center gap-1.5 text-[11px] font-bold text-gray-600 cursor-pointer select-none">
+                            <input type="checkbox" checked={showVoidedSales} onChange={(e) => setShowVoidedSales(e.target.checked)} className="accent-blue-600" />
+                            Voided බිල් පෙන්වන්න
+                          </label>
+                          {salesSummary.sales?.length > 0 && (
+                            <button onClick={handleClearAllSales} className="bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 px-3 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all">🧹 සියල්ල ඉවත් කරන්න</button>
+                          )}
+                        </div>
                       </div>
                       <table className="w-full text-left border-collapse text-xs">
                         <thead>
@@ -3732,20 +4345,34 @@ useEffect(() => {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100 font-medium">
-                          {salesSummary.sales?.map((sale) => (
-                            <tr key={sale._id} className="hover:bg-slate-50/80">
+                          {salesSummary.sales?.filter((sale) => showVoidedSales || sale.status !== "Voided").map((sale) => {
+                            const isVoided = sale.status === "Voided"; // 🛠️ FIX: was rendered identically to a normal sale before
+                            return (
+                            <tr key={sale._id} className={`hover:bg-slate-50/80 ${isVoided ? "bg-gray-50 opacity-60" : ""}`}>
                               <td className="p-3 font-mono font-bold text-slate-700">{sale.invoiceNo || `#${sale._id.slice(-8).toUpperCase()}`}</td>
                               <td className="p-3 text-gray-500">{new Date(sale.createdAt).toLocaleString()}</td>
                               <td className="p-3 font-bold">{sale.cashier || "Cashier"}</td>
-                              <td className="p-3"><span className={`px-2 py-0.5 rounded-sm font-bold text-[10px] ${sale.paymentMethod === 'Cash' ? 'bg-emerald-100 text-emerald-700' : sale.paymentMethod === 'Credit' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`}>{sale.paymentMethod}</span></td>
-                              <td className="p-3 text-right font-black text-slate-900">රු. {sale.totalAmount.toFixed(2)}</td>
-                              <td className="p-3 text-right text-emerald-600">රු. {sale.totalProfit.toFixed(2)}</td>
+                              <td className="p-3">
+                                {isVoided ? (
+                                  <span className="px-2 py-0.5 rounded-sm font-bold text-[10px] bg-gray-200 text-gray-600">🚫 VOIDED</span>
+                                ) : (
+                                  <span className={`px-2 py-0.5 rounded-sm font-bold text-[10px] ${sale.paymentMethod === 'Cash' ? 'bg-emerald-100 text-emerald-700' : sale.paymentMethod === 'Credit' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`}>{sale.paymentMethod}</span>
+                                )}
+                              </td>
+                              <td className={`p-3 text-right font-black ${isVoided ? "text-gray-400 line-through" : "text-slate-900"}`}>රු. {sale.totalAmount.toFixed(2)}</td>
+                              <td className={`p-3 text-right ${isVoided ? "text-gray-400 line-through" : "text-emerald-600"}`}>රු. {sale.totalProfit.toFixed(2)}</td>
                               <td className="p-3 text-center">
-                                <button onClick={() => { const ref = sale.invoiceNo || sale._id; setReturnInvoiceSearch(ref); setActiveTab("returns"); handleSearchInvoiceForReturn(null, ref); }} className="bg-amber-100 hover:bg-amber-600 text-amber-700 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all mr-1">🔄 Return</button>
-                                <button onClick={() => handleVoidSale(sale._id)} className="bg-red-100 hover:bg-red-600 text-red-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all">VOID ✕</button>
+                                {isVoided ? (
+                                  <span className="text-[10px] text-gray-400 font-bold">— No actions —</span>
+                                ) : (
+                                  <>
+                                    <button onClick={() => { const ref = sale.invoiceNo || sale._id; setReturnInvoiceSearch(ref); setActiveTab("returns"); handleSearchInvoiceForReturn(null, ref); }} className="bg-amber-100 hover:bg-amber-600 text-amber-700 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all mr-1">🔄 Return</button>
+                                    <button onClick={() => handleVoidSale(sale._id)} className="bg-red-100 hover:bg-red-600 text-red-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all">VOID ✕</button>
+                                  </>
+                                )}
                               </td>
                             </tr>
-                          ))}
+                          );})}
                         </tbody>
                       </table>
                     </div>
@@ -3758,32 +4385,39 @@ useEffect(() => {
       </div>
 
       {/* 🖨️ INVOICE PRINT LAYOUT */}
+      {/* 🆕 ON-DEMAND PRINTING: checkout වෙලාවේ cart එක live ව කියවනවා වෙනුවට, lastCompletedSale
+          snapshot එකෙන්ම render වෙනවා - ඒ නිසා cashier "Print" click කරන වෙලාවේ cart එක already
+          reset වෙලා තිබුණත් (අලුත් බිලක් දාන්න පටන් අරන් තිබුණත්) receipt එක හරියටම පෙන්වයි. */}
+      {lastCompletedSale && (
       <div className="hidden print:block p-4 w-[80mm] text-black font-mono text-xs bg-white">
         <div className="text-center font-bold text-sm">--- SmartStore ---</div>
         <div className="text-center text-[9px] text-gray-700">No. 123/A, Kandy Road, Kadawatha</div>
         <div className="text-center text-[9px] text-gray-700">071-2683025 / 078-1533835</div>
-        {/* <hr className="border-dashed border-black my-1" /> */}
-        {/* <div className="text-center font-black text-[13px] tracking-wider border border-red-600 rounded px-2 py-1 my-1 inline-block mx-auto w-full">
-          {lastInvoiceNo || "N/A"}
-        </div> */}
         <hr className="border-dotted border-black my-2" />
         <div className="text-[9px] space-y-0.5">
           
           <div className="grid grid-cols-[65px_1fr]">
             <span className="font-bold">බිල්ප​ත් අංකය</span>
-            <span>: {lastInvoiceNo || "N/A"}</span>
+            <span>: {lastCompletedSale.invoiceNo || "N/A"}</span>
           </div>
 
           <div className="grid grid-cols-[65px_1fr]">
             <span className="font-bold">අයකැමි</span>
-            <span>: {user.username}</span>
+            <span>: {lastCompletedSale.cashierName}</span>
           </div>
 
           <div className="grid grid-cols-[65px_1fr]">
             <span className="font-bold">දිනය</span>
             <span>
-              : {new Date().toLocaleDateString()} {new Date().toLocaleTimeString()}
+              : {new Date(lastCompletedSale.date).toLocaleDateString()} {new Date(lastCompletedSale.date).toLocaleTimeString()}
             </span>
+          </div>
+
+          {/* 🆕 Credit customer කෙනෙක් නම් නම, නැත්නම් "Cash Customer" - fallback එක, Bills Queue එකේ
+              මේ update එකට කලින් localStorage එකේ save වුනු පැරණි entries වලට customerLabel නැති නිසා */}
+          <div className="grid grid-cols-[65px_1fr]">
+            <span className="font-bold">පාරිභෝගිකයා</span>
+            <span>: {lastCompletedSale.customerLabel || "මුදල් පාරිභෝගිකයා (Cash Customer)"}</span>
           </div>
         </div>
         <hr className="border-dotted border-black my-2" />
@@ -3799,7 +4433,7 @@ useEffect(() => {
 
         {/* Table Rows */}
         <div className="space-y-1.5">
-          {cart.map((item, index) => {
+          {lastCompletedSale.items.map((item, index) => {
             const discPercent = parseFloat(item.discountPercent || item.discount) || 0;
             const originalPrice = parseFloat(item.price);
             const discountAmount = (originalPrice * discPercent) / 100;
@@ -3827,84 +4461,86 @@ useEffect(() => {
 
         {/* Financial Summary */}
         <div className="space-y-1 mt-2 text-[11px] pt-2">
-          {appliedBillDiscount && (
+          {lastCompletedSale.appliedBillDiscount && (
             <>
               <div className="flex justify-between text-gray-600">
                 <span>උප එකතුව (Subtotal)</span>
-                <span>රු. {calculateSubtotal().toFixed(2)}</span>
+                <span>රු. {lastCompletedSale.subtotal.toFixed(2)}</span>
               </div>
               <div className="flex justify-between text-gray-600">
-                <span>{appliedBillDiscount.name} ({appliedBillDiscount.percent}%)</span>
-                <span>- රු. {calculateBillDiscountAmount().toFixed(2)}</span>
+                <span>{lastCompletedSale.appliedBillDiscount.name} ({lastCompletedSale.appliedBillDiscount.percent}%)</span>
+                <span>- රු. {lastCompletedSale.billDiscountAmount.toFixed(2)}</span>
               </div>
             </>
           )}
           <div className="flex justify-between font-bold text-sm">
             <span>මුළු එකතුව</span>
-            <span className="border-b-4 border-double border-t pt-1 pb-1">රු. {calculateTotal().toFixed(2)}</span>
+            <span className="border-b-4 border-double border-t pt-1 pb-1">රු. {lastCompletedSale.total.toFixed(2)}</span>
           </div>
          
           
-          {paymentMethod === "Credit" && (
+          {lastCompletedSale.paymentMethod === "Credit" && (
             <div className="text-gray-700 flex justify-between border-b border-dotted pb-1 pt-1">
             <span>ගෙවූ මුදල (Amount Paid)</span>
             <span className="font-bold">
-              රු. {(paymentMethod === "Credit" ? (amountPaid === "" ? 0 : parseFloat(amountPaid)) : calculateTotal()).toFixed(2)}
+              රු. {lastCompletedSale.amountPaid.toFixed(2)}
             </span>
           </div>
           )}
           
           
-          {paymentMethod === "Credit" && (
+          {lastCompletedSale.paymentMethod === "Credit" && (
             <div className="flex justify-between  font-bold border-b border-dotted pt-1 pb-1">
               <span className="text-red-600">ගෙවීමට ඇති මුද​ල (Credit Amount)</span>
-              <span className="text-red-600">රු. {(calculateTotal() - (amountPaid === "" ? 0 : parseFloat(amountPaid))).toFixed(2)}</span>
+              <span className="text-red-600">රු. {(lastCompletedSale.total - lastCompletedSale.amountPaid).toFixed(2)}</span>
             </div>
           )}
 
-          {paymentMethod === "Cash" && (
+          {lastCompletedSale.paymentMethod === "Cash" && (
             <>
-              <div className="flex justify-between border-b border-dotted pb-1 pt-1 font-bold text-gray-700"><span>ලැබුණු මුදල (Cash):</span><span>රු. {parseFloat(cashReceived || 0).toFixed(2)}</span></div>
-              <div className="flex justify-between border-b border-dotted pb-1 font-bold text-slate-900"><span>ඉතිරි මුදල (Balance):</span><span>රු. {balanceAmount.toFixed(2)}</span></div>
+              <div className="flex justify-between border-b border-dotted pb-1 pt-1 font-bold text-gray-700"><span>ලැබුණු මුදල (Cash):</span><span>රු. {lastCompletedSale.cashReceived.toFixed(2)}</span></div>
+              <div className="flex justify-between border-b border-dotted pb-1 font-bold text-slate-900"><span>ඉතිරි මුදල (Balance):</span><span>රු. {lastCompletedSale.balanceAmount.toFixed(2)}</span></div>
             </>
           )}
 
           <div className="text-gray-700 text-[9px] flex justify-between border-b border-dotted pb-1 pt-1">
             <span>මුළු භාණ්ඩ ගණ​න (No. of Items)</span>
             <span>
-              {cart.length}
+              {lastCompletedSale.items.length}
             </span>
           </div>
 
         </div>
 
         {/* TOTAL SAVINGS BOX */}
-        {cart.reduce((sum, item) => {
-          const discP = parseFloat(item.discountPercent || item.discount) || 0;
-          const marketP = parseFloat(item.marketPrice || item.price);
-          const priceP = parseFloat(item.price);
-          const totalSavedPerItem = (marketP - priceP) + ((priceP * discP) / 100);
-          return sum + (totalSavedPerItem * parseFloat(item.qty || 0));
-        }, 
-        0) > 0 && (
-          <div className="mt-3 p-1.5 border border-black border-dashed text-center bg-slate-50">
-            <div className="font-bold text-[10px]">ඔබට ලැබුණු මුළු ලාභය</div>
-            <div className="font-black text-xs mt-0.5">
-              Rs.{cart.reduce((sum, item) => {
-                const discP = parseFloat(item.discountPercent || item.discount) || 0;
-                const marketP = parseFloat(item.marketPrice || item.price);
-                const priceP = parseFloat(item.price);
-                const totalSavedPerItem = (marketP - priceP) + ((priceP * discP) / 100);
-                return sum + (totalSavedPerItem * parseFloat(item.qty || 0));
-              }, 0).toFixed(2)}
+        {/* 🔐 FIX: ගණනය කරලා, cents දක්වා round කරගෙනයි 0ට සාපේක්ෂව check කරන්නේ - floating-point
+            arithmetic එකේදී (19.99 - 19.99 වගේ subtract/multiply ගණනාවක්) ඇත්තටම 0 වෙන අගයක්
+            0.00000000003 වගේ "almost zero" අගයක් විදිහට ඉතුරු වෙලා, "ලාභය Rs.0.00" කියලා වැරදීමකින්
+            print වෙන්න පුළුවන් - round කරගත්තාම ඒ noise එක නිවැරදිව 0 ට පත් වෙනවා. */}
+        {(() => {
+          const rawSavings = lastCompletedSale.items.reduce((sum, item) => {
+            const discP = parseFloat(item.discountPercent || item.discount) || 0;
+            const marketP = parseFloat(item.marketPrice || item.price);
+            const priceP = parseFloat(item.price);
+            const totalSavedPerItem = (marketP - priceP) + ((priceP * discP) / 100);
+            return sum + (totalSavedPerItem * parseFloat(item.qty || 0));
+          }, 0);
+          const totalSavings = Math.round(rawSavings * 100) / 100;
+
+          if (totalSavings <= 0) return null; // 0 හෝ ඊට අඩු නම් කොටසම print වෙන්නේ නෑ
+
+          return (
+            <div className="mt-3 p-1.5 border border-black border-dashed text-center bg-slate-50">
+              <div className="font-bold text-[10px]">ඔබට ලැබුණු මුළු ලාභය</div>
+              <div className="font-black text-xs mt-0.5">Rs.{totalSavings.toFixed(2)}</div>
             </div>
-          </div>
-        )
-        }
+          );
+        })()}
 
         <hr className="border-dashed border-black my-2" />
         <div className="text-center font-bold text-[9px] uppercase tracking-wider">Thank you! Come Again.</div>
       </div>
+      )}
     </div>
   );
 }
