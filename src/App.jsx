@@ -1281,7 +1281,7 @@ useEffect(() => {
       // නැත්නම් (Cash/Card/QR, customer නැතුව) "Cash Customer" කියලා පෙන්වයි
       customerLabel: (paymentMethod === "Credit" && selectedCustomer)
         ? selectedCustomer.name
-        : "මුදල් පාරිභෝගිකයා (Cash Customer)",
+        : "Cash Customer",
       items: cart,
       paymentMethod,
       appliedBillDiscount,
@@ -4078,7 +4078,7 @@ useEffect(() => {
                                       : "bg-white text-gray-600 border-gray-300"
                                   }`}
                                 >
-                                  ➕ එකතු කරන්න (Add)
+                                  ➕ Add More
                                 </button>
                                 <button
                                   type="button"
@@ -4089,7 +4089,7 @@ useEffect(() => {
                                       : "bg-white text-gray-600 border-gray-300"
                                   }`}
                                 >
-                                  🔄 මෙයට සකසන්න (Set)
+                                  🔄 Replace
                                 </button>
                               </div>
                               {grnCurrentItem.stockMode === "set" && (
@@ -4690,8 +4690,8 @@ useEffect(() => {
           );
         })()}
 
-        <hr className="border-dashed border-black my-2" />
-        <div className="text-center font-bold text-[9px] uppercase tracking-wider">Thank you! Come Again.</div>
+        
+        <div className="text-center font-bold text-[10px] mt-2 uppercase tracking-wider">ස්තූතියි, නැවත එන්​න!!!</div>
       </div>
       )}
     </div>
