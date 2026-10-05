@@ -172,6 +172,11 @@ function App() {
   const [promotions, setPromotions] = useState([]);
   const [appliedBillDiscount, setAppliedBillDiscount] = useState(null); // { name, percent }
   const [promotionForm, setPromotionForm] = useState({ name: "", discountPercent: "" });
+
+  // 🆕 ADMIN: Cashier/Staff Account Management (POST /api/users/register, admin-only)
+  const [staffUsers, setStaffUsers] = useState([]); // 🆕 admin can see which accounts exist (username + role only, never password)
+  const [newUserForm, setNewUserForm] = useState({ username: "", password: "", role: "cashier" });
+  const [isCreatingUser, setIsCreatingUser] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [searchPhone, setSearchPhone] = useState(""); // Holds Name or Phone query
   const [customerForm, setCustomerForm] = useState({ name: "", phone: "" });
@@ -188,10 +193,7 @@ function App() {
   const [grnSupplierId, setGrnSupplierId] = useState("");
   const [grnCurrentItem, setGrnCurrentItem] = useState({ productId: "", quantity: "", costPrice: "", stockMode: "add" });
   const [grnItems, setGrnItems] = useState([]); // [{ productId, productName, unit, quantity, costPrice }]
-  // 🆕 GRN DUPLICATE PROTECTION: සැපයුම්කරුගේ physical invoice number එක - අනිවාර්ය, duplicate-checked
-  // (කලින් "Invoice අංකය / සටහන (Optional)" කියලා optional field එකක් ඇතුලේ merge වෙලා තිබුණා)
-  const [grnSupplierInvoiceNo, setGrnSupplierInvoiceNo] = useState("");
-  const [grnDescription, setGrnDescription] = useState(""); // දැන් මේක purely optional note එකක් විතරයි
+  const [grnDescription, setGrnDescription] = useState("");
   const [viewSupplierDetails, setViewSupplierDetails] = useState(null); // 🛠️ NEW: Supplier details modal එකට (ledger history)
   const [viewCustomerDetails, setViewCustomerDetails] = useState(null); // 🆕 Customer credit ledger modal එකට (customer _id)
   const [supplierPayment, setSupplierPayment] = useState({ supplierId: "", amount: "" });
@@ -337,6 +339,7 @@ function App() {
         fetchSalesSummary();
         fetchSuppliers();
         fetchReturnHistory();
+        fetchStaffUsers(); // 🆕 Cashier/Staff Account list
       }
       fetchExpiringProducts();
     }
@@ -562,6 +565,46 @@ useEffect(() => {
       const response = await axios.get(`${API_BASE_URL}/promotions`);
       setPromotions(response.data);
     } catch (error) { console.error(error); }
+  };
+
+  // 🆕 ADMIN: Cashier/Staff Account Management
+  const fetchStaffUsers = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/users`);
+      setStaffUsers(response.data);
+    } catch (error) { console.error(error); }
+  };
+
+  const handleCreateUserSubmit = async (e) => {
+    e.preventDefault();
+    if (!newUserForm.username.trim() || !newUserForm.password) {
+      return showToast("Username සහ Password දෙකම ඇතුලත් කරන්න!", "warning");
+    }
+    if (newUserForm.password.length < 8) {
+      return showToast("Password එක අවම වශයෙන් character 8ක් තිබිය යුතුයි!", "warning");
+    }
+    setIsCreatingUser(true);
+    try {
+      const response = await axios.post(`${API_BASE_URL}/users/register`, newUserForm);
+      showToast(response.data.message || "ගිණුම සාර්ථකව හැදුවා! ✅");
+      setNewUserForm({ username: "", password: "", role: "cashier" });
+      fetchStaffUsers();
+    } catch (error) {
+      showToast(error.response?.data?.message || "ගිණුම හැදීම අසාර්ථකයි!", "error");
+    } finally {
+      setIsCreatingUser(false);
+    }
+  };
+
+  const handleDeleteUser = async (id, username) => {
+    if (!window.confirm(`"${username}" ගිණුම මකා දැමීමට විශ්වාසද?`)) return;
+    try {
+      const response = await axios.delete(`${API_BASE_URL}/users/${id}`);
+      showToast(response.data.message || "ගිණුම මකා දැමුවා! 🗑️");
+      fetchStaffUsers();
+    } catch (error) {
+      showToast(error.response?.data?.message || "මකා දැමීම අසාර්ථකයි!", "error");
+    }
   };
 
   const handlePromotionSubmit = async (e) => {
@@ -2340,7 +2383,7 @@ useEffect(() => {
                 onClick={() => setShowSaleCompleteModal(false)}
                 className="w-full py-2.5 rounded-xl text-sm font-700 text-slate-500 hover:bg-slate-100 transition-colors"
               >
-                Print එපා, ඊළඟ බිලට යන්න ➡️
+                Print කරන්​න එපා, ඊළඟ බිලට යන්න ➡️
               </button>
             </div>
           </div>
@@ -2458,7 +2501,7 @@ useEffect(() => {
                   className="w-full h-11 px-3.5 rounded-xl bg-sunken border border-line focus:border-accent focus:bg-card focus:outline-none tnum text-[13.5px] font-500 transition-colors"
                 />
 
-                <label className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-line cursor-pointer hover:bg-sunken transition-colors">
+                {/* <label className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-line cursor-pointer hover:bg-sunken transition-colors">
                   <input
                     type="checkbox"
                     checked={registerTempAsProduct}
@@ -2466,7 +2509,7 @@ useEffect(() => {
                     className="w-4 h-4 accent-accent"
                   />
                   <span className="text-[12.5px] font-600 text-body">Also save it to the catalog</span>
-                </label>
+                </label> */}
               </div>
 
               <div className="px-4 pb-4">
@@ -3325,10 +3368,10 @@ useEffect(() => {
             <div className="flex w-full h-full bg-slate-50 overflow-hidden">
               {/* Sidebar Tabs for Admin */}
               <div className="w-48 bg-slate-800 text-gray-300 flex flex-col font-medium text-sm">
-                <button onClick={() => setAdminSubTab("products")} className={`p-3 text-left font-bold ${adminSubTab === "products" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📦 තොග කළමනාකරණය</button>
-                <button onClick={() => setAdminSubTab("customers")} className={`p-3 text-left font-bold ${adminSubTab === "customers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👥 පාරිභෝගික පොත</button>
+                <button onClick={() => setAdminSubTab("products")} className={`p-3 text-left font-bold ${adminSubTab === "products" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📦 Stock Management</button>
+                <button onClick={() => setAdminSubTab("customers")} className={`p-3 text-left font-bold ${adminSubTab === "customers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👥 Customer Records</button>
                 <button onClick={() => setAdminSubTab("promotions")} className={`p-3 text-left font-bold ${adminSubTab === "promotions" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🎉 Special Discounts</button>
-                <button onClick={() => setAdminSubTab("suppliers")} className={`p-3 text-left font-bold ${adminSubTab === "suppliers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚚 සැපයුම්කරුවන්</button>
+                <button onClick={() => setAdminSubTab("suppliers")} className={`p-3 text-left font-bold ${adminSubTab === "suppliers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚚 Suppliers</button>
                 <button onClick={() => setAdminSubTab("reorder")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "reorder" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
                   <span>🔔 Low-Stock Alerts</span>
                   {lowStockProducts.length > 0 && (
@@ -3347,8 +3390,9 @@ useEffect(() => {
                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black ${adminSubTab === "unregistered" ? "bg-white/20" : "bg-amber-500 text-white animate-pulse"}`}>{unregisteredItemGroups.length}</span>
                   )}
                 </button>
-                <button onClick={() => setAdminSubTab("returns")} className={`p-3 text-left font-bold ${adminSubTab === "returns" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🔄 Return/Exchange ඉතිහාසය</button>
-                <button onClick={() => setAdminSubTab("sales")} className={`p-3 text-left font-bold ${adminSubTab === "sales" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📊 විකුණුම් වාර්තා</button>
+                <button onClick={() => setAdminSubTab("returns")} className={`p-3 text-left font-bold ${adminSubTab === "returns" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🔄 Return/Exchange History</button>
+                <button onClick={() => setAdminSubTab("sales")} className={`p-3 text-left font-bold ${adminSubTab === "sales" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📊 Sales Reports</button>
+                <button onClick={() => setAdminSubTab("staff")} className={`p-3 text-left font-bold ${adminSubTab === "staff" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👤 User Accounts</button>
               </div>
 
               {/* Sub Tab Content Panel */}
@@ -4088,7 +4132,7 @@ useEffect(() => {
 
                           <input type="text" placeholder="Invoice අංකය / සටහන (Optional)" value={grnDescription} onChange={(e) => setGrnDescription(e.target.value)} className="w-full p-2 border rounded text-xs" />
 
-                          <button type="button" onClick={handleSubmitGrn} disabled={grnItems.length === 0 || !grnSupplierId || !grnSupplierInvoiceNo.trim()} className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white py-2 rounded text-xs font-bold transition-all">✅ GRN එක සම්පූර්ණයෙන් Submit කරන්න</button>
+                          <button type="button" onClick={handleSubmitGrn} disabled={grnItems.length === 0 || !grnSupplierId} className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white py-2 rounded text-xs font-bold transition-all">✅ GRN එක සම්පූර්ණයෙන් Submit කරන්න</button>
                         </div>
                       </div>
 
@@ -4409,6 +4453,84 @@ useEffect(() => {
                     </div>
                   </div>
                 )}
+
+                {/* 🆕 ADMIN: Cashier/Staff Account Management - create accounts without needing Postman/curl */}
+                {adminSubTab === "staff" && (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* Create Account Form */}
+                    <div className="bg-white p-5 rounded-xl border shadow-xs h-fit">
+                      <h3 className="text-xs font-black uppercase text-slate-800 mb-4">➕ Create Account</h3>
+                      <form onSubmit={handleCreateUserSubmit} className="space-y-4">
+                        <div>
+                          <label className="text-[11px] font-bold text-gray-600 block mb-1">Username:</label>
+                          <input
+                            type="text"
+                            required
+                            autoComplete="off"
+                            value={newUserForm.username}
+                            onChange={(e) => setNewUserForm({ ...newUserForm, username: e.target.value })}
+                            className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white"
+                            
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[11px] font-bold text-gray-600 block mb-1">Password: <span className="text-gray-400 font-normal">(Min 8 characters)</span></label>
+                          <input
+                            type="password"
+                            required
+                            minLength={8}
+                            autoComplete="new-password"
+                            value={newUserForm.password}
+                            onChange={(e) => setNewUserForm({ ...newUserForm, password: e.target.value })}
+                            className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white"
+                            
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[11px] font-bold text-gray-600 block mb-1">Role:</label>
+                          <select
+                            value={newUserForm.role}
+                            onChange={(e) => setNewUserForm({ ...newUserForm, role: e.target.value })}
+                            className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white font-bold"
+                          >
+                            <option value="cashier">Cashier</option>
+                            <option value="admin">Admin</option>
+                          </select>
+                        </div>
+                        <button type="submit" disabled={isCreatingUser} className="w-full bg-blue-600 disabled:opacity-50 text-white py-2 rounded text-xs font-bold shadow-md">
+                          {isCreatingUser ? "Creating..." : "Create Account"}
+                        </button>
+                      </form>
+                    </div>
+
+                    {/* Staff Accounts List */}
+                    <div className="lg:col-span-2 bg-white rounded-xl border shadow-xs overflow-hidden h-fit">
+                      <div className="p-4 border-b bg-gray-50">
+                        <h3 className="text-xs font-black uppercase text-slate-800">👤 Active Accounts</h3>
+                      </div>
+                      {staffUsers.length === 0 ? (
+                        <div className="p-6 text-center text-gray-400 text-xs">Account not connected yet</div>
+                      ) : (
+                        <div className="divide-y divide-gray-100">
+                          {staffUsers.map((u) => (
+                            <div key={u._id} className="flex justify-between items-center px-4 py-3">
+                              <div>
+                                <p className="text-xs font-bold text-slate-800">
+                                  {u.username}
+                                  {u.username === user.username && <span className="ml-1.5 text-[9px] text-gray-400 font-normal">(you)</span>}
+                                </p>
+                                <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-black ${u.role === "admin" ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700"}`}>{u.role === "admin" ? "ADMIN" : "CASHIER"}</span>
+                              </div>
+                              {u.username !== user.username && (
+                                <button onClick={() => handleDeleteUser(u._id, u.username)} className="bg-red-100 hover:bg-red-600 text-red-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold shrink-0">🗑️ Delete</button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -4448,7 +4570,7 @@ useEffect(() => {
               මේ update එකට කලින් localStorage එකේ save වුනු පැරණි entries වලට customerLabel නැති නිසා */}
           <div className="grid grid-cols-[65px_1fr]">
             <span className="font-bold">පාරිභෝගිකයා</span>
-            <span>: {lastCompletedSale.customerLabel || "මුදල් පාරිභෝගිකයා (Cash Customer)"}</span>
+            <span>: {lastCompletedSale.customerLabel || "Cash Customer"}</span>
           </div>
         </div>
         <hr className="border-dotted border-black my-2" />
