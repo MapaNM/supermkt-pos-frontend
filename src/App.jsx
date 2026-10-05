@@ -3,9 +3,12 @@ import { flushSync } from "react-dom";
 import axios from "axios";
 import { db } from "./db";
 
-// 🛠️ HOSTING CONFIGURATION: Localhost සහ Render.com දෙකටම ගැලපෙන සේ පොදු URL එකක් සාදා ඇත
-// Render එකට දැමූ පසු "http://localhost:5008/api", https://supermkt-pos-backend.onrender.com/api වෙනුවට Render Live URL එක දමන්න
-const API_BASE_URL = "https://supermkt-pos-backend.onrender.com/api"; 
+// 🛠️ HOSTING CONFIGURATION: දැන් Vite environment variable එකකින් (VITE_API_URL) decide වෙනවා -
+// local dev (localhost:5173) එකේදී සහ Vercel production එකේදී දෙකටම code එකම edit කරන්න ඕන නෑ.
+//   local: project root එකේ .env.local file එකක් හදලා → VITE_API_URL=http://localhost:5008/api
+//   Vercel: Project Settings → Environment Variables → VITE_API_URL = https://supermkt-pos-backend.onrender.com/api
+// දෙකම set කර නැත්නම්, local dev backend එකටම (localhost:5008) default වෙනවා.
+const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5008/api";
 
 // 🔐 AUTH: page load වෙනකොටම, කලින් session එකකින් token එකක් localStorage එකේ save වෙලා
 // තිබුනොත් ඒක axios වල default header එකට දාගන්නවා - ඒකෙන් පස්සේ APP එකේ තියෙන axios.get/
@@ -185,7 +188,10 @@ function App() {
   const [grnSupplierId, setGrnSupplierId] = useState("");
   const [grnCurrentItem, setGrnCurrentItem] = useState({ productId: "", quantity: "", costPrice: "", stockMode: "add" });
   const [grnItems, setGrnItems] = useState([]); // [{ productId, productName, unit, quantity, costPrice }]
-  const [grnDescription, setGrnDescription] = useState("");
+  // 🆕 GRN DUPLICATE PROTECTION: සැපයුම්කරුගේ physical invoice number එක - අනිවාර්ය, duplicate-checked
+  // (කලින් "Invoice අංකය / සටහන (Optional)" කියලා optional field එකක් ඇතුලේ merge වෙලා තිබුණා)
+  const [grnSupplierInvoiceNo, setGrnSupplierInvoiceNo] = useState("");
+  const [grnDescription, setGrnDescription] = useState(""); // දැන් මේක purely optional note එකක් විතරයි
   const [viewSupplierDetails, setViewSupplierDetails] = useState(null); // 🛠️ NEW: Supplier details modal එකට (ledger history)
   const [viewCustomerDetails, setViewCustomerDetails] = useState(null); // 🆕 Customer credit ledger modal එකට (customer _id)
   const [supplierPayment, setSupplierPayment] = useState({ supplierId: "", amount: "" });
@@ -3812,7 +3818,20 @@ useEffect(() => {
                             ))}
                           </select>
                           <input type="number" required placeholder="පියවන ලද මුදල (රු.)" value={creditPayment.amount} onChange={(e) => setCreditPayment({ ...creditPayment, amount: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-emerald-700" />
-                          <button type="submit" className="w-full bg-emerald-600 text-white py-2 rounded text-xs font-bold">ණය මුදල කපා හරින්න 🎉</button>
+                          {/* 🆕 FIX: තෝරපු customer ට දැනටමත් ණයක් නැත්නම්, submit button එක disable කරලා
+                              clear message එකක් පෙන්වනවා - backend එකේදී fail වෙනකම් බලාගෙන ඉන්න ඕන නෑ */}
+                          {(() => {
+                            const selectedForPayment = customers.find((c) => c._id === creditPayment.customerId);
+                            const hasNoDue = selectedForPayment && (selectedForPayment.creditBalance || 0) <= 0;
+                            return (
+                              <>
+                                {hasNoDue && (
+                                  <p className="text-[11px] font-bold text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">⚠️ මෙම පාරිභෝගිකයාට ණයක් නැත - ගෙවීමක් අවශ්‍ය නැත</p>
+                                )}
+                                <button type="submit" disabled={hasNoDue} className="w-full bg-emerald-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white py-2 rounded text-xs font-bold">ණය මුදල කපා හරින්න 🎉</button>
+                              </>
+                            );
+                          })()}
                         </form>
                       </div>
                     </div>
@@ -4069,7 +4088,7 @@ useEffect(() => {
 
                           <input type="text" placeholder="Invoice අංකය / සටහන (Optional)" value={grnDescription} onChange={(e) => setGrnDescription(e.target.value)} className="w-full p-2 border rounded text-xs" />
 
-                          <button type="button" onClick={handleSubmitGrn} disabled={grnItems.length === 0 || !grnSupplierId} className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white py-2 rounded text-xs font-bold transition-all">✅ GRN එක සම්පූර්ණයෙන් Submit කරන්න</button>
+                          <button type="button" onClick={handleSubmitGrn} disabled={grnItems.length === 0 || !grnSupplierId || !grnSupplierInvoiceNo.trim()} className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white py-2 rounded text-xs font-bold transition-all">✅ GRN එක සම්පූර්ණයෙන් Submit කරන්න</button>
                         </div>
                       </div>
 
@@ -4084,7 +4103,19 @@ useEffect(() => {
                             ))}
                           </select>
                           <input type="number" required placeholder="ගෙවන ලද මුදල (රු.)" value={supplierPayment.amount} onChange={(e) => setSupplierPayment({ ...supplierPayment, amount: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-emerald-700" />
-                          <button type="submit" className="w-full bg-emerald-600 text-white py-2 rounded text-xs font-bold">ගෙවීම සටහන් කරන්න 🎉</button>
+                          {/* 🆕 FIX: තෝරපු supplier ට ගෙවීමට මුදලක් නැත්නම්, submit button එක disable කරයි */}
+                          {(() => {
+                            const selectedSupplierForPayment = suppliers.find((s) => s._id === supplierPayment.supplierId);
+                            const hasNoDue = selectedSupplierForPayment && (selectedSupplierForPayment.balanceDue || 0) <= 0;
+                            return (
+                              <>
+                                {hasNoDue && (
+                                  <p className="text-[11px] font-bold text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">⚠️ මෙම සැපයුම්කරුට ගෙවීමට මුදලක් නැත - ගෙවීමක් අවශ්‍ය නැත</p>
+                                )}
+                                <button type="submit" disabled={hasNoDue} className="w-full bg-emerald-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white py-2 rounded text-xs font-bold">ගෙවීම සටහන් කරන්න 🎉</button>
+                              </>
+                            );
+                          })()}
                         </form>
                       </div>
                     </div>
