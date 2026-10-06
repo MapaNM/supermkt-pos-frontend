@@ -83,6 +83,69 @@ const formatQtyWithUnit = (qty, unit) => {
   return symbol ? `${qtyNum} ${symbol}` : `${qtyNum}`;
 };
 
+// 🆕 DASHBOARD: දිනපතා විකුණුම් Bar Chart - අමතර npm library එකක් (recharts/chart.js) install කරන්න
+// ඕන නැතුව, Lightweight inline SVG එකකින්ම හදලා තියෙන්නේ. Single series (Revenue) නිසා
+// Legend එකක් ඕන නෑ - Title එකම ඒක කියනවා. Hover කරොත් දවසේ Revenue/Profit/Bills ටික Tooltip එකක පෙන්වයි.
+function DailySalesChart({ data }) {
+  const [hoverIndex, setHoverIndex] = useState(null);
+  if (!data || data.length === 0) return null;
+
+  const maxRevenue = Math.max(...data.map((d) => d.revenue), 1); // 0-data uneweda, 1 avoids div-by-zero
+  const chartHeight = 140;
+  const barGapPercent = 28; // % of each column's width left as gap between bars
+
+  const formatDayLabel = (dateStr) => {
+    const d = new Date(dateStr + "T00:00:00");
+    return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
+  };
+
+  return (
+    <div className="relative">
+      <div className="flex items-end gap-0" style={{ height: chartHeight }}>
+        {data.map((d, i) => {
+          const heightPercent = (d.revenue / maxRevenue) * 100;
+          const isHovered = hoverIndex === i;
+          return (
+            <div
+              key={d.date}
+              className="flex-1 h-full flex flex-col items-center justify-end relative cursor-pointer"
+              onMouseEnter={() => setHoverIndex(i)}
+              onMouseLeave={() => setHoverIndex(null)}
+            >
+              {isHovered && (
+                <div className="absolute bottom-full mb-1.5 z-10 bg-slate-900 text-white text-[10px] rounded-md px-2.5 py-1.5 whitespace-nowrap shadow-lg">
+                  <p className="font-black">{formatDayLabel(d.date)}</p>
+                  <p>විකුණුම්: රු.{d.revenue.toFixed(2)}</p>
+                  <p className="text-emerald-300">ලාභය: රු.{d.profit.toFixed(2)}</p>
+                  <p className="text-blue-300">බිල්: {d.billCount}</p>
+                </div>
+              )}
+              <div
+                className={`w-full rounded-t-sm transition-colors ${isHovered ? "bg-[#1b5cb8]" : "bg-[#2a78d6]"}`}
+                style={{
+                  height: `${Math.max(heightPercent, d.revenue > 0 ? 2 : 0)}%`,
+                  marginLeft: `${barGapPercent / 2}%`,
+                  marginRight: `${barGapPercent / 2}%`,
+                  width: `${100 - barGapPercent}%`,
+                }}
+              />
+            </div>
+          );
+        })}
+      </div>
+      {/* baseline */}
+      <div className="h-px bg-slate-200 w-full" />
+      <div className="flex mt-1.5">
+        {data.map((d, i) => (
+          <div key={d.date} className="flex-1 text-center text-[9px] text-gray-400 font-medium">
+            {i % 2 === 0 ? formatDayLabel(d.date) : ""}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   // 🛠️ FIX: page refresh always dropped you back on Billing regardless of what
   // screen you were on. Now the last tab survives a refresh (sessionStorage —
@@ -208,9 +271,10 @@ function App() {
   const [paymentMethod, setPaymentMethod] = useState("Cash");
 
   // Sales Summary State
-  const [salesSummary, setSalesSummary] = useState({ 
-    totalSalesCount: 0, totalRevenue: 0, totalProfit: 0, 
-    breakdown: { cashSales: 0, cardSales: 0, qrSales: 0, creditSales: 0 }, sales: [] 
+  const [salesSummary, setSalesSummary] = useState({
+    totalSalesCount: 0, totalRevenue: 0, totalProfit: 0,
+    breakdown: { cashSales: 0, cardSales: 0, qrSales: 0, creditSales: 0 }, sales: [],
+    dailySales: [], cashierPerformance: [] // 🆕 DASHBOARD
   });
 
   // 🛠️ UPDATED: සිස්ටම් එක Refresh කරද්දී LocalStorage එක පරීක්ෂා කර ලොග් වී සිටින පරිශීලකයා රඳවා ගනී
@@ -240,6 +304,7 @@ function App() {
   const billingSearchRef = useRef(null);
   const cartScrollRef = useRef(null);
   const productFormRef = useRef(null); // 🆕 so Edit can scroll the form into view
+  const lowStockAlertShownRef = useRef(false); // 🆕 DASHBOARD: low-stock toast once per login session, not on every products refresh
 
   // Product CRUD States
   const [isEditing, setIsEditing] = useState(false);
@@ -370,7 +435,9 @@ function App() {
   // specific tab is open gives near-real-time updates without background load the
   // rest of the time (it stops the instant you navigate away).
   useEffect(() => {
-    if (!(user?.role === "admin" && activeTab === "admin" && adminSubTab === "sales")) return;
+    // 🆕 "dashboard" tab එකත් මේකටම add කලා - Daily Sales Graph/Cashier Performance table එකත්
+    // live update වෙන්න ඕන, "sales" log tab එකට විතරක් සීමා කරලා තිබ්බේ කලින්.
+    if (!(user?.role === "admin" && activeTab === "admin" && (adminSubTab === "sales" || adminSubTab === "dashboard"))) return;
     const interval = setInterval(() => { fetchSalesSummary(); }, 5000);
     return () => clearInterval(interval);
   }, [user, activeTab, adminSubTab]);
@@ -1996,6 +2063,22 @@ useEffect(() => {
   const lowStockProducts = products.filter(p => getTotalStock(p) <= (p.minStockLevel ?? 5));
   const activeCustomerDetails = viewCustomerDetails ? customers.find(c => c._id === viewCustomerDetails) : null;
 
+  // 🆕 DASHBOARD: Admin කෙනෙක් login වුනාම, Low Stock Products තියෙනවනම් (checkout එකක්
+  // කරනකොටම Products Refresh වෙනවා නිසා) Toast එකක් එක පාරක් විතරක් පෙන්වයි - Login කරන හැම
+  // වෙලාවකම Products refresh වෙනකොට repeat වෙන්නේ නෑ (ref flag එක login session එකකට එකක් විතරයි).
+  useEffect(() => {
+    if (!user) {
+      lowStockAlertShownRef.current = false; // logout වුනාම reset කරයි, ඊළඟ login එකේදී නැවත පෙන්වන්න
+      return;
+    }
+    if (user.role === "admin" && products.length > 0 && !lowStockAlertShownRef.current) {
+      lowStockAlertShownRef.current = true;
+      if (lowStockProducts.length > 0) {
+        showToast(`⚠️ Low-Stock Products ${lowStockProducts.length}ක් තියෙනවා! Dashboard/Reorder List බලන්න.`, "warning");
+      }
+    }
+  }, [user, products]);
+
   // 🛠️ NEW: Low stock products, Preferred Supplier එක අනුව group කිරීම (Purchase Order Suggestion සඳහා)
   const lowStockGroupedBySupplier = lowStockProducts.reduce((groups, p) => {
     const key = p.preferredSupplierId || "unassigned";
@@ -3368,6 +3451,12 @@ useEffect(() => {
             <div className="flex w-full h-full bg-slate-50 overflow-hidden">
               {/* Sidebar Tabs for Admin */}
               <div className="w-48 bg-slate-800 text-gray-300 flex flex-col font-medium text-sm">
+                <button onClick={() => setAdminSubTab("dashboard")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "dashboard" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
+                  <span>📈 Dashboard</span>
+                  {lowStockProducts.length > 0 && (
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black ${adminSubTab === "dashboard" ? "bg-white/20" : "bg-red-500 text-white animate-pulse"}`}>{lowStockProducts.length}</span>
+                  )}
+                </button>
                 <button onClick={() => setAdminSubTab("products")} className={`p-3 text-left font-bold ${adminSubTab === "products" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📦 Stock Management</button>
                 <button onClick={() => setAdminSubTab("customers")} className={`p-3 text-left font-bold ${adminSubTab === "customers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👥 Customer Records</button>
                 <button onClick={() => setAdminSubTab("promotions")} className={`p-3 text-left font-bold ${adminSubTab === "promotions" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🎉 Special Discounts</button>
@@ -3397,6 +3486,117 @@ useEffect(() => {
 
               {/* Sub Tab Content Panel */}
               <div className="flex-1 p-6 overflow-y-auto">
+                {/* 🆕 DASHBOARD: Today's KPIs, Daily Sales Graph, Cashier Performance, Low Stock summary - Admin ගේ "landing page" */}
+                {adminSubTab === "dashboard" && (() => {
+                  const dailySales = salesSummary.dailySales || [];
+                  const todayStat = dailySales[dailySales.length - 1] || { revenue: 0, profit: 0, billCount: 0 };
+                  const yesterdayStat = dailySales[dailySales.length - 2] || { revenue: 0, profit: 0, billCount: 0 };
+                  const pctChange = (curr, prev) => (prev > 0 ? Math.round(((curr - prev) / prev) * 100) : null);
+                  const revenueChangePct = pctChange(todayStat.revenue, yesterdayStat.revenue);
+                  const cashierPerformance = salesSummary.cashierPerformance || [];
+
+                  return (
+                    <div className="space-y-6">
+                      {/* Today KPI Cards */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="bg-white p-4 rounded-xl border shadow-xs">
+                          <p className="text-[10px] font-bold text-gray-400 uppercase">අද විකුණුම්</p>
+                          <p className="text-xl font-black text-blue-600">රු. {todayStat.revenue.toFixed(2)}</p>
+                          {revenueChangePct !== null && (
+                            <p className={`text-[10px] font-bold mt-0.5 ${revenueChangePct >= 0 ? "text-emerald-600" : "text-red-500"}`}>
+                              {revenueChangePct >= 0 ? "▲" : "▼"} {Math.abs(revenueChangePct)}% ඊයෙට වඩා
+                            </p>
+                          )}
+                        </div>
+                        <div className="bg-white p-4 rounded-xl border shadow-xs">
+                          <p className="text-[10px] font-bold text-gray-400 uppercase">අද ලාභය</p>
+                          <p className="text-xl font-black text-emerald-600">රු. {todayStat.profit.toFixed(2)}</p>
+                        </div>
+                        <div className="bg-white p-4 rounded-xl border shadow-xs">
+                          <p className="text-[10px] font-bold text-gray-400 uppercase">අද බිල් ගණන</p>
+                          <p className="text-xl font-black text-slate-900">{todayStat.billCount}</p>
+                        </div>
+                        <div className="bg-white p-4 rounded-xl border shadow-xs">
+                          <p className="text-[10px] font-bold text-gray-400 uppercase">Low-Stock Products</p>
+                          <p className={`text-xl font-black ${lowStockProducts.length > 0 ? "text-red-600" : "text-slate-900"}`}>{lowStockProducts.length}</p>
+                        </div>
+                      </div>
+
+                      {/* Daily Sales Chart */}
+                      <div className="bg-white p-5 rounded-xl border shadow-xs">
+                        <h3 className="text-xs font-black uppercase text-slate-800 mb-4">📊 දිනපතා විකුණුම් (පසුගිය දින 14)</h3>
+                        <DailySalesChart data={dailySales} />
+                      </div>
+
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        {/* Cashier Performance */}
+                        <div className="bg-white rounded-xl border shadow-xs overflow-hidden h-fit">
+                          <div className="p-4 border-b bg-gray-50">
+                            <h3 className="text-xs font-black uppercase text-slate-800">🧑‍💼 Cashier Performance</h3>
+                          </div>
+                          {cashierPerformance.length === 0 ? (
+                            <div className="p-6 text-center text-gray-400 text-xs">තවම විකුණුම් නැත</div>
+                          ) : (
+                            <table className="w-full text-left border-collapse text-xs">
+                              <thead>
+                                <tr className="bg-slate-100 text-slate-700 font-bold border-b">
+                                  <th className="p-2.5">Cashier</th>
+                                  <th className="p-2.5 text-center">Bills</th>
+                                  <th className="p-2.5 text-right">Sales</th>
+                                  <th className="p-2.5 text-right">Avg Bill</th>
+                                  <th className="p-2.5 text-center">Void/Return</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-100 font-medium">
+                                {cashierPerformance.map((c, i) => (
+                                  <tr key={c.cashier} className={i === 0 ? "bg-amber-50/60" : ""}>
+                                    <td className="p-2.5 font-bold">{i === 0 && "🏆 "}{c.cashier}</td>
+                                    <td className="p-2.5 text-center">{c.billCount}</td>
+                                    <td className="p-2.5 text-right font-black text-slate-900">රු. {c.totalRevenue.toFixed(2)}</td>
+                                    <td className="p-2.5 text-right text-gray-500">රු. {c.avgBillValue.toFixed(2)}</td>
+                                    <td className="p-2.5 text-center">
+                                      {(c.voidCount > 0 || c.returnCount > 0) ? (
+                                        <span className="text-[10px] font-bold text-red-500">{c.voidCount}V / {c.returnCount}R</span>
+                                      ) : <span className="text-gray-300">—</span>}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+
+                        {/* Low Stock Summary */}
+                        <div className="bg-white rounded-xl border shadow-xs overflow-hidden h-fit">
+                          <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
+                            <div>
+                              <h3 className="text-xs font-black uppercase text-slate-800">⚠️ Low-Stock Products</h3>
+                            </div>
+                            {lowStockProducts.length > 0 && (
+                              <button onClick={() => setAdminSubTab("reorder")} className="bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 px-3 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all shrink-0">සම්පූර්ණ List →</button>
+                            )}
+                          </div>
+                          {lowStockProducts.length === 0 ? (
+                            <div className="p-6 text-center text-gray-400 text-xs">✅ සියලුම Products ප්‍රමාණවත් තොගයක් තියෙනවා</div>
+                          ) : (
+                            <div className="divide-y divide-gray-100">
+                              {lowStockProducts.slice(0, 6).map((p) => (
+                                <div key={p._id} className="flex justify-between items-center px-4 py-2.5">
+                                  <p className="text-xs font-bold text-slate-800">{p.name}</p>
+                                  <span className="bg-red-100 text-red-600 px-2 py-0.5 rounded-full text-[10px] font-black">{formatQtyWithUnit(getTotalStock(p), p.unit ?? "Kg")}</span>
+                                </div>
+                              ))}
+                              {lowStockProducts.length > 6 && (
+                                <div className="px-4 py-2 text-center text-[10px] text-gray-400 font-bold">+ තවත් {lowStockProducts.length - 6}ක්...</div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {adminSubTab === "products" && (
                   <div className="space-y-6">
                     {/* Add/Edit Form */}
