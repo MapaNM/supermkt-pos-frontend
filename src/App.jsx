@@ -252,11 +252,21 @@ function App() {
   const [supplierForm, setSupplierForm] = useState({ name: "", phone: "", address: "" });
   const [isEditingSupplier, setIsEditingSupplier] = useState(false);
   const [editSupplierId, setEditSupplierId] = useState(null);
-  // 🛠️ UPDATED (Step 2 - GRN Multi-item): එකම Supplier Invoice එකකින් Products කිහිපයක් cart එකක් විදිහට එකතු කිරීමට
+  // 🆕 PROFESSIONAL GRN REBUILD: එකම Supplier Invoice එකකින් Products කිහිපයක් cart එකක් විදිහට එකතු කිරීමට +
+  // Ordered vs Received (Discrepancy), Expiry Date, Supplier Invoice Reference
   const [grnSupplierId, setGrnSupplierId] = useState("");
-  const [grnCurrentItem, setGrnCurrentItem] = useState({ productId: "", quantity: "", costPrice: "", stockMode: "add" });
-  const [grnItems, setGrnItems] = useState([]); // [{ productId, productName, unit, quantity, costPrice }]
+  const [grnSupplierInvoiceRef, setGrnSupplierInvoiceRef] = useState(""); // 🆕 සැපයුම්කරුගේ Invoice/Delivery Note අංකය
+  const [grnCurrentItem, setGrnCurrentItem] = useState({ productId: "", orderedQty: "", quantity: "", costPrice: "", expiryDate: "", stockMode: "add" });
+  const [grnItems, setGrnItems] = useState([]); // [{ productId, productName, unit, orderedQty, quantity, costPrice, expiryDate }]
   const [grnDescription, setGrnDescription] = useState("");
+  const [isSubmittingGrn, setIsSubmittingGrn] = useState(false); // 🆕 double-submit වැලැක්වීමට
+
+  // 🆕 GRN History tab states
+  const [grnHistory, setGrnHistory] = useState([]);
+  const [isLoadingGrnHistory, setIsLoadingGrnHistory] = useState(false);
+  const [grnHistoryFilters, setGrnHistoryFilters] = useState({ supplierId: "", from: "", to: "", q: "" });
+  const [viewGrnDetails, setViewGrnDetails] = useState(null); // 🆕 Single GRN detail/print modal
+
   const [viewSupplierDetails, setViewSupplierDetails] = useState(null); // 🛠️ NEW: Supplier details modal එකට (ledger history)
   const [viewCustomerDetails, setViewCustomerDetails] = useState(null); // 🆕 Customer credit ledger modal එකට (customer _id)
   const [supplierPayment, setSupplierPayment] = useState({ supplierId: "", amount: "" });
@@ -440,6 +450,13 @@ function App() {
     if (!(user?.role === "admin" && activeTab === "admin" && (adminSubTab === "sales" || adminSubTab === "dashboard"))) return;
     const interval = setInterval(() => { fetchSalesSummary(); }, 5000);
     return () => clearInterval(interval);
+  }, [user, activeTab, adminSubTab]);
+
+  // 🆕 GRN History tab එක open කරාම (හෝ Filter එකක් වෙනස් කරාම) ලැයිස්තුව load කරයි
+  useEffect(() => {
+    if (!(user?.role === "admin" && activeTab === "admin" && adminSubTab === "grnHistory")) return;
+    fetchGrnHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, activeTab, adminSubTab]);
 
   // Escape key + background scroll lock
@@ -907,13 +924,13 @@ useEffect(() => {
     }
   };
 
-  // 🛠️ UPDATED (Step 2 - GRN Multi-item): වත්මන් Row එක GRN List එකට එකතු කිරීම
+  // 🆕 PROFESSIONAL GRN REBUILD: වත්මන් Row එක GRN List එකට එකතු කිරීම (Ordered Qty + Expiry Date සමඟ)
   const handleAddGrnItem = () => {
     if (!grnCurrentItem.productId) {
       return showToast("කරුණාකර භාණ්ඩයක් තෝරන්න!", "warning");
     }
     if (!grnCurrentItem.quantity || parseFloat(grnCurrentItem.quantity) <= 0) {
-      return showToast("නිවැරදි ප්‍රමාණයක් ඇතුලත් කරන්න!", "warning");
+      return showToast("නිවැරදි ලැබුණු ප්‍රමාණයක් ඇතුලත් කරන්න!", "warning");
     }
     if (!grnCurrentItem.costPrice || parseFloat(grnCurrentItem.costPrice) <= 0) {
       return showToast("නිවැරදි ගැනුම් මිලක් ඇතුලත් කරන්න!", "warning");
@@ -922,17 +939,24 @@ useEffect(() => {
     const product = products.find(p => p._id === grnCurrentItem.productId);
     if (!product) return showToast("භාණ්ඩය සොයාගත නොහැක!", "error");
 
+    const orderedQty = parseFloat(grnCurrentItem.orderedQty) || 0;
+    const receivedQty = parseFloat(grnCurrentItem.quantity);
+
     setGrnItems([...grnItems, {
       productId: product._id,
       productName: product.name,
       unit: product.unit ?? "Kg",
-      quantity: parseFloat(grnCurrentItem.quantity),
+      orderedQty,
+      quantity: receivedQty,
       costPrice: parseFloat(grnCurrentItem.costPrice),
-      stockMode: grnCurrentItem.stockMode || "add"
+      expiryDate: grnCurrentItem.expiryDate || "",
+      stockMode: grnCurrentItem.stockMode || "add",
+      // 🆕 UI සඳහා - Ordered Qty සටහන් කරලා තියෙනවා නම්, Received Qty එකට සමාන නැත්නම් highlight කරයි
+      hasDiscrepancy: orderedQty > 0 && orderedQty !== receivedQty,
     }]);
 
     // Row එක reset කරයි, ඊළඟ item එක type කරන්න
-    setGrnCurrentItem({ productId: "", quantity: "", costPrice: "", stockMode: "add" });
+    setGrnCurrentItem({ productId: "", orderedQty: "", quantity: "", costPrice: "", expiryDate: "", stockMode: "add" });
   };
 
   // 🛠️ NEW: GRN List එකෙන් Item එකක් ඉවත් කිරීම
@@ -940,24 +964,116 @@ useEffect(() => {
     setGrnItems(grnItems.filter((_, i) => i !== index));
   };
 
-  // 🛠️ UPDATED (Step 2 - GRN Multi-item): List එකේ තියෙන Items ඔක්කොම එකවර Submit කිරීම
+  // 🆕 PROFESSIONAL GRN REBUILD: List එකේ තියෙන Items ඔක්කොම එකවර Submit කර GRN Document එකක් සාදයි
   const handleSubmitGrn = async () => {
     if (!grnSupplierId) return showToast("කරුණාකර සැපයුම්කරුවෙක් තෝරන්න!", "warning");
     if (grnItems.length === 0) return showToast("අවම වශයෙන් භාණ්ඩයක් හෝ GRN List එකට එකතු කරන්න!", "warning");
 
+    setIsSubmittingGrn(true);
     try {
       const response = await axios.post(`${API_BASE_URL}/suppliers/record-purchase/${grnSupplierId}`, {
-        items: grnItems.map(item => ({ productId: item.productId, quantity: item.quantity, costPrice: item.costPrice, stockMode: item.stockMode })),
-        description: grnDescription
+        items: grnItems.map(item => ({
+          productId: item.productId,
+          orderedQty: item.orderedQty,
+          receivedQty: item.quantity,
+          costPrice: item.costPrice,
+          expiryDate: item.expiryDate || null,
+          stockMode: item.stockMode,
+        })),
+        description: grnDescription,
+        supplierInvoiceRef: grnSupplierInvoiceRef,
+        receivedBy: user?.username || "",
       });
       showToast(response.data.message || "GRN එක සාර්ථකව සටහන් කලා! 📦");
       setGrnSupplierId("");
+      setGrnSupplierInvoiceRef("");
       setGrnItems([]);
-      setGrnCurrentItem({ productId: "", quantity: "", costPrice: "", stockMode: "add" });
+      setGrnCurrentItem({ productId: "", orderedQty: "", quantity: "", costPrice: "", expiryDate: "", stockMode: "add" });
       setGrnDescription("");
       fetchSuppliers();
       fetchProducts(); // 🛠️ Stock එකත් Cost Price එකත් වෙනස් වුනු නිසා Products ලැයිස්තුවත් Refresh කරයි
-    } catch (error) { showToast(error.response?.data?.message || "සටහන් කිරීම අසාර්ථකයි!", "error"); }
+      if (response.data?.grn) {
+        setGrnHistory(prev => [response.data.grn, ...prev]);
+      }
+    } catch (error) {
+      showToast(error.response?.data?.message || "සටහන් කිරීම අසාර්ථකයි!", "error");
+    } finally {
+      setIsSubmittingGrn(false);
+    }
+  };
+
+  // 🆕 GRN History ලබාගැනීම (filter සමඟ)
+  const fetchGrnHistory = async () => {
+    setIsLoadingGrnHistory(true);
+    try {
+      const params = {};
+      if (grnHistoryFilters.supplierId) params.supplierId = grnHistoryFilters.supplierId;
+      if (grnHistoryFilters.from) params.from = grnHistoryFilters.from;
+      if (grnHistoryFilters.to) params.to = grnHistoryFilters.to;
+      if (grnHistoryFilters.q) params.q = grnHistoryFilters.q;
+      const response = await axios.get(`${API_BASE_URL}/suppliers/grn/list`, { params });
+      setGrnHistory(response.data);
+    } catch (error) {
+      showToast("GRN ඉතිහාසය ලබාගැනීම අසාර්ථකයි!", "error");
+    } finally {
+      setIsLoadingGrnHistory(false);
+    }
+  };
+
+  // 🆕 GRN එකක් Print/PDF කිරීම - නව window එකක ප්‍රින්ට් සඳහාම සකස් කරපු document එකක් open කරයි
+  const handlePrintGrn = (grn) => {
+    const printWindow = window.open("", "_blank", "width=800,height=900");
+    if (!printWindow) return showToast("Pop-up Blocker එක නිසා Print Window එක open කරන්න බැරි උනා!", "error");
+
+    const rowsHtml = grn.items.map((item, i) => `
+      <tr>
+        <td style="padding:6px;border:1px solid #ddd;">${i + 1}</td>
+        <td style="padding:6px;border:1px solid #ddd;">${item.productName}</td>
+        <td style="padding:6px;border:1px solid #ddd;text-align:right;">${item.orderedQty || "-"}</td>
+        <td style="padding:6px;border:1px solid #ddd;text-align:right;">${item.receivedQty} ${item.unit || ""}</td>
+        <td style="padding:6px;border:1px solid #ddd;text-align:right;">Rs. ${Number(item.costPrice).toFixed(2)}</td>
+        <td style="padding:6px;border:1px solid #ddd;text-align:right;">Rs. ${Number(item.subtotal).toFixed(2)}</td>
+        <td style="padding:6px;border:1px solid #ddd;">${item.expiryDate ? new Date(item.expiryDate).toLocaleDateString() : "-"}</td>
+      </tr>
+    `).join("");
+
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>${grn.grnNo}</title>
+          <style>
+            body { font-family: Arial, sans-serif; padding: 24px; color: #1e293b; }
+            h1 { font-size: 20px; margin-bottom: 2px; }
+            table { border-collapse: collapse; width: 100%; margin-top: 16px; font-size: 12px; }
+            th { background: #f1f5f9; padding: 6px; border: 1px solid #ddd; text-align: left; }
+            .meta { font-size: 12px; margin-top: 10px; line-height: 1.6; }
+            .badge { display:inline-block; padding:2px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; }
+            .total { text-align: right; font-size: 14px; font-weight: bold; margin-top: 10px; }
+          </style>
+        </head>
+        <body>
+          <h1>📦 Goods Received Note</h1>
+          <div class="meta">
+            <div><b>GRN No:</b> ${grn.grnNo}</div>
+            <div><b>Date:</b> ${new Date(grn.date).toLocaleString()}</div>
+            <div><b>Supplier:</b> ${grn.supplierName}</div>
+            ${grn.supplierInvoiceRef ? `<div><b>Supplier Invoice Ref:</b> ${grn.supplierInvoiceRef}</div>` : ""}
+            <div><b>Status:</b> <span class="badge" style="background:${grn.hasDiscrepancy ? "#fee2e2" : "#dcfce7"};color:${grn.hasDiscrepancy ? "#b91c1c" : "#15803d"};">${grn.status}</span></div>
+            ${grn.notes ? `<div><b>Notes:</b> ${grn.notes}</div>` : ""}
+            ${grn.receivedBy ? `<div><b>Received By:</b> ${grn.receivedBy}</div>` : ""}
+          </div>
+          <table>
+            <thead>
+              <tr><th>#</th><th>Product</th><th>Ordered</th><th>Received</th><th>Cost Price</th><th>Subtotal</th><th>Expiry</th></tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+          <div class="total">Grand Total: Rs. ${Number(grn.grandTotal).toFixed(2)}</div>
+          <script>window.onload = () => window.print();</script>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
   };
 
   // 🛠️ NEW: Supplier ට මුදල් ගෙවීම (Balance Due අඩු කරයි)
@@ -3461,6 +3577,7 @@ useEffect(() => {
                 <button onClick={() => setAdminSubTab("customers")} className={`p-3 text-left font-bold ${adminSubTab === "customers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👥 Customer Records</button>
                 <button onClick={() => setAdminSubTab("promotions")} className={`p-3 text-left font-bold ${adminSubTab === "promotions" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🎉 Special Discounts</button>
                 <button onClick={() => setAdminSubTab("suppliers")} className={`p-3 text-left font-bold ${adminSubTab === "suppliers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚚 Suppliers</button>
+                <button onClick={() => setAdminSubTab("grnHistory")} className={`p-3 text-left font-bold ${adminSubTab === "grnHistory" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📋 GRN History</button>
                 <button onClick={() => setAdminSubTab("reorder")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "reorder" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
                   <span>🔔 Low-Stock Alerts</span>
                   {lowStockProducts.length > 0 && (
@@ -4220,18 +4337,27 @@ useEffect(() => {
                         </form>
                       </div>
 
-                      {/* 🛠️ UPDATED (Step 2 - GRN Multi-item): Cart-style Stock ලැබීම් සටහන් කිරීම */}
+                      {/* 🆕 PROFESSIONAL GRN REBUILD: Modernized Cart-style Stock ලැබීම් සටහන් කිරීම */}
                       <div className="bg-white p-5 rounded-xl border shadow-xs h-fit">
-                        <h3 className="text-xs font-black uppercase text-amber-700 mb-3">📦 Stock ලැබීමක් සටහන් කිරීම (GRN)</h3>
-                        <p className="text-[10px] text-gray-500 mb-3">එකම Invoice එකකින් ලැබුණු භාණ්ඩ කිහිපයම මෙතනින් එකතු කරන්න — අන්තිමට එකවර Submit කරන්න.</p>
+                        <h3 className="text-xs font-black uppercase text-amber-700 mb-3">📦 නව GRN එකක් සටහන් කිරීම</h3>
+                        <p className="text-[10px] text-gray-500 mb-3">එකම Invoice එකකින් ලැබුණු භාණ්ඩ කිහිපයම මෙතනින් එකතු කරන්න — අන්තිමට එකවර Submit කරාම GRN අංකයක් සහිත Document එකක් auto සාදයි.</p>
 
                         <div className="space-y-3">
-                          <select value={grnSupplierId} onChange={(e) => setGrnSupplierId(e.target.value)} className="w-full p-2 border rounded text-xs bg-gray-50 text-gray-700 font-bold">
-                            <option value="">සැපයුම්කරු තෝරන්න...</option>
-                            {suppliers.map(s => (
-                              <option key={s._id} value={s._id}>{s.name} (ගෙවීමට ඇත: රු.{s.balanceDue?.toFixed(2)})</option>
-                            ))}
-                          </select>
+                          <div className="grid grid-cols-2 gap-2">
+                            <select value={grnSupplierId} onChange={(e) => setGrnSupplierId(e.target.value)} className="w-full p-2 border rounded text-xs bg-gray-50 text-gray-700 font-bold">
+                              <option value="">සැපයුම්කරු තෝරන්න...</option>
+                              {suppliers.map(s => (
+                                <option key={s._id} value={s._id}>{s.name} (ගෙවීමට ඇත: රු.{s.balanceDue?.toFixed(2)})</option>
+                              ))}
+                            </select>
+                            <input
+                              type="text"
+                              placeholder="සැපයුම්කරු Invoice අංකය"
+                              value={grnSupplierInvoiceRef}
+                              onChange={(e) => setGrnSupplierInvoiceRef(e.target.value)}
+                              className="w-full p-2 border rounded text-xs bg-gray-50"
+                            />
+                          </div>
 
                           {/* Add Item Row */}
                           <div className="bg-amber-50/60 border border-amber-200 rounded-lg p-3 space-y-2">
@@ -4256,16 +4382,33 @@ useEffect(() => {
 
                             <div className="grid grid-cols-2 gap-2">
                               <div>
-                                <label className="text-[10px] font-bold text-gray-500 block mb-1">ලැබුණු ප්‍රමාණය:</label>
-                                <input type="number" step="0.001" placeholder="Qty" value={grnCurrentItem.quantity} onChange={(e) => setGrnCurrentItem({ ...grnCurrentItem, quantity: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-slate-800 bg-white" />
+                                <label className="text-[10px] font-bold text-gray-500 block mb-1">Order කළ ප්‍රමාණය (Optional):</label>
+                                <input type="number" step="0.001" placeholder="Ordered Qty" value={grnCurrentItem.orderedQty} onChange={(e) => setGrnCurrentItem({ ...grnCurrentItem, orderedQty: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-slate-500 bg-white" />
                               </div>
+                              <div>
+                                <label className="text-[10px] font-bold text-gray-500 block mb-1">ලැබුණු ප්‍රමාණය: <span className="text-red-500">*</span></label>
+                                <input type="number" step="0.001" placeholder="Received Qty" value={grnCurrentItem.quantity} onChange={(e) => setGrnCurrentItem({ ...grnCurrentItem, quantity: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-slate-800 bg-white" />
+                              </div>
+                            </div>
+
+                            {grnCurrentItem.orderedQty && grnCurrentItem.quantity && parseFloat(grnCurrentItem.orderedQty) !== parseFloat(grnCurrentItem.quantity) && (
+                              <p className="text-[10px] text-red-600 font-bold bg-red-50 border border-red-200 rounded px-2 py-1">
+                                ⚠️ Discrepancy: Order කළේ {grnCurrentItem.orderedQty}, ලැබුණේ {grnCurrentItem.quantity}
+                              </p>
+                            )}
+
+                            <div className="grid grid-cols-2 gap-2">
                               <div>
                                 <label className="text-[10px] font-bold text-gray-500 block mb-1">ගැනුම් මිල (රු./ඒකකයට):</label>
                                 <input type="number" step="0.01" placeholder="Cost Price" value={grnCurrentItem.costPrice} onChange={(e) => setGrnCurrentItem({ ...grnCurrentItem, costPrice: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-amber-700 bg-white" />
                               </div>
+                              <div>
+                                <label className="text-[10px] font-bold text-gray-500 block mb-1">කල් ඉකුත් වන දිනය (Optional):</label>
+                                <input type="date" value={grnCurrentItem.expiryDate} onChange={(e) => setGrnCurrentItem({ ...grnCurrentItem, expiryDate: e.target.value })} className="w-full p-2 border rounded text-xs font-bold text-slate-700 bg-white" />
+                              </div>
                             </div>
 
-                            {/* 🛠️ NEW: Stock Mode Toggle - Add (එකතු කරන්න) vs Set (ලෙස සකසන්න / Overwrite) */}
+                            {/* 🛠️ Stock Mode Toggle - Add (නව Batch එකක් හදයි) vs Set (ලෙස සකසන්න / Overwrite) */}
                             <div>
                               <label className="text-[10px] font-bold text-gray-500 block mb-1">වත්මන් තොගයට කරන්නේ:</label>
                               <div className="grid grid-cols-2 gap-1.5">
@@ -4278,7 +4421,7 @@ useEffect(() => {
                                       : "bg-white text-gray-600 border-gray-300"
                                   }`}
                                 >
-                                  ➕ Add More
+                                  ➕ Add More (New Batch)
                                 </button>
                                 <button
                                   type="button"
@@ -4293,7 +4436,7 @@ useEffect(() => {
                                 </button>
                               </div>
                               {grnCurrentItem.stockMode === "set" && (
-                                <p className="text-[9px] text-purple-600 font-bold mt-1">⚠️ වත්මන් තොගය සම්පූර්ණයෙන් මෙම ප්‍රමාණයට replace වේ (Opening Stock / Correction සඳහා පමණි)</p>
+                                <p className="text-[9px] text-purple-600 font-bold mt-1">⚠️ වත්මන් තොගය සම්පූර්ණයෙන් මෙම ප්‍රමාණයට replace වේ (Opening Stock / Correction සඳහා පමණි — Batch කිහිපයක් තියෙන Products වලට ඉඩ නැත)</p>
                               )}
                             </div>
 
@@ -4313,8 +4456,15 @@ useEffect(() => {
                                         {item.stockMode === "set" && (
                                           <span className="ml-1.5 text-[8px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-black align-middle">SET</span>
                                         )}
+                                        {item.hasDiscrepancy && (
+                                          <span className="ml-1.5 text-[8px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-black align-middle">⚠️ DISCREPANCY</span>
+                                        )}
                                       </p>
-                                      <p className="text-[10px] text-gray-500">{formatQtyWithUnit(item.quantity, item.unit)} × රු.{item.costPrice.toFixed(2)}</p>
+                                      <p className="text-[10px] text-gray-500">
+                                        {item.orderedQty > 0 ? `${formatQtyWithUnit(item.orderedQty, item.unit)} Ordered → ` : ""}
+                                        {formatQtyWithUnit(item.quantity, item.unit)} Received × රු.{item.costPrice.toFixed(2)}
+                                        {item.expiryDate ? ` • Exp: ${item.expiryDate}` : ""}
+                                      </p>
                                     </div>
                                     <div className="flex items-center gap-2">
                                       <span className="font-black text-amber-700">රු.{(item.quantity * item.costPrice).toFixed(2)}</span>
@@ -4330,9 +4480,11 @@ useEffect(() => {
                             </div>
                           )}
 
-                          <input type="text" placeholder="Invoice අංකය / සටහන (Optional)" value={grnDescription} onChange={(e) => setGrnDescription(e.target.value)} className="w-full p-2 border rounded text-xs" />
+                          <input type="text" placeholder="සටහන (Optional)" value={grnDescription} onChange={(e) => setGrnDescription(e.target.value)} className="w-full p-2 border rounded text-xs" />
 
-                          <button type="button" onClick={handleSubmitGrn} disabled={grnItems.length === 0 || !grnSupplierId} className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white py-2 rounded text-xs font-bold transition-all">✅ GRN එක සම්පූර්ණයෙන් Submit කරන්න</button>
+                          <button type="button" onClick={handleSubmitGrn} disabled={grnItems.length === 0 || !grnSupplierId || isSubmittingGrn} className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white py-2 rounded text-xs font-bold transition-all">
+                            {isSubmittingGrn ? "⏳ සටහන් කරමින්..." : "✅ GRN එක සම්පූර්ණයෙන් Submit කරන්න"}
+                          </button>
                         </div>
                       </div>
 
@@ -4398,6 +4550,135 @@ useEffect(() => {
                           ))}
                         </tbody>
                       </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* 🆕 PROFESSIONAL GRN REBUILD: GRN History Tab - Filter/Search + Print */}
+                {adminSubTab === "grnHistory" && (
+                  <div className="p-6 space-y-4">
+                    <div className="bg-white p-4 rounded-xl border shadow-xs">
+                      <h3 className="text-xs font-black uppercase text-slate-800 mb-3">📋 GRN History (Goods Received Notes)</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+                        <select
+                          value={grnHistoryFilters.supplierId}
+                          onChange={(e) => setGrnHistoryFilters({ ...grnHistoryFilters, supplierId: e.target.value })}
+                          className="p-2 border rounded text-xs bg-gray-50 font-bold text-gray-700"
+                        >
+                          <option value="">සියලුම සැපයුම්කරුවන්</option>
+                          {suppliers.map(s => <option key={s._id} value={s._id}>{s.name}</option>)}
+                        </select>
+                        <input type="date" value={grnHistoryFilters.from} onChange={(e) => setGrnHistoryFilters({ ...grnHistoryFilters, from: e.target.value })} className="p-2 border rounded text-xs" />
+                        <input type="date" value={grnHistoryFilters.to} onChange={(e) => setGrnHistoryFilters({ ...grnHistoryFilters, to: e.target.value })} className="p-2 border rounded text-xs" />
+                        <input
+                          type="text"
+                          placeholder="GRN අංකය / Invoice Ref සොයන්න..."
+                          value={grnHistoryFilters.q}
+                          onChange={(e) => setGrnHistoryFilters({ ...grnHistoryFilters, q: e.target.value })}
+                          className="p-2 border rounded text-xs"
+                        />
+                        <button onClick={fetchGrnHistory} className="bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold py-2">🔍 Filter කරන්න</button>
+                      </div>
+                    </div>
+
+                    <div className="bg-white rounded-xl border shadow-xs overflow-hidden">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-100 text-slate-700 font-bold border-b">
+                            <th className="p-3">GRN Number</th>
+                            <th className="p-3">Date</th>
+                            <th className="p-3">Supplier</th>
+                            <th className="p-3">Invoice Ref</th>
+                            <th className="p-3 text-center">Status</th>
+                            <th className="p-3 text-right">Total</th>
+                            <th className="p-3 text-center">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 font-medium">
+                          {isLoadingGrnHistory && (
+                            <tr><td colSpan="7" className="p-6 text-center text-gray-400">Loading...</td></tr>
+                          )}
+                          {!isLoadingGrnHistory && grnHistory.length === 0 && (
+                            <tr><td colSpan="7" className="p-6 text-center text-gray-400">GRN Not Found</td></tr>
+                          )}
+                          {!isLoadingGrnHistory && grnHistory.map((g) => (
+                            <tr key={g._id} onClick={() => setViewGrnDetails(g)} className="hover:bg-blue-50/60 cursor-pointer transition-colors">
+                              <td className="p-3 font-black text-slate-900">{g.grnNo}</td>
+                              <td className="p-3 text-gray-500">{new Date(g.date).toLocaleDateString()}</td>
+                              <td className="p-3 text-gray-700 font-bold">{g.supplierName}</td>
+                              <td className="p-3 text-gray-500">{g.supplierInvoiceRef || "-"}</td>
+                              <td className="p-3 text-center">
+                                <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full ${
+                                  g.status === "Received" ? "bg-emerald-100 text-emerald-700" :
+                                  g.status === "Partially Received" ? "bg-amber-100 text-amber-700" :
+                                  "bg-red-100 text-red-700"
+                                }`}>{g.status}</span>
+                              </td>
+                              <td className="p-3 text-right font-black text-amber-700">රු. {g.grandTotal?.toFixed(2)}</td>
+                              <td className="p-3 text-center">
+                                <button onClick={(e) => { e.stopPropagation(); handlePrintGrn(g); }} className="bg-slate-700 hover:bg-slate-800 text-white px-2 py-1 rounded text-[10px] font-bold">🖨️ Print</button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* 🆕 GRN Detail Modal (click a row in GRN History) */}
+                {viewGrnDetails && (
+                  <div
+                    className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+                    onClick={() => setViewGrnDetails(null)}
+                  >
+                    <div
+                      className="bg-white rounded-xl border border-gray-200 shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col relative"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="p-4 border-b bg-slate-900 text-white rounded-t-xl flex justify-between items-start">
+                        <div>
+                          <h3 className="text-sm font-black flex items-center gap-1.5">📦 {viewGrnDetails.grnNo}</h3>
+                          <p className="text-[11px] text-gray-300 mt-0.5">{viewGrnDetails.supplierName} • {new Date(viewGrnDetails.date).toLocaleString()}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => handlePrintGrn(viewGrnDetails)} className="bg-white/10 hover:bg-white/20 text-white px-2 py-1 rounded text-[10px] font-bold">🖨️ Print</button>
+                          <button onClick={() => setViewGrnDetails(null)} className="text-gray-300 hover:text-white font-black text-lg leading-none">✕</button>
+                        </div>
+                      </div>
+
+                      {viewGrnDetails.hasDiscrepancy && (
+                        <div className="p-3 bg-red-50 border-b border-red-100 text-[11px] font-bold text-red-700">
+                          ⚠️ මෙම GRN එකේ Ordered Qty සහ Received Qty අතර වෙනසක් (Discrepancy) තිබේ — පහත list එකේ highlight වී ඇති items බලන්න.
+                        </div>
+                      )}
+                      {viewGrnDetails.supplierInvoiceRef && (
+                        <div className="px-4 pt-3 text-[11px] text-gray-600"><b>Supplier Invoice Ref:</b> {viewGrnDetails.supplierInvoiceRef}</div>
+                      )}
+                      {viewGrnDetails.receivedBy && (
+                        <div className="px-4 pt-1 text-[11px] text-gray-600"><b>Received By:</b> {viewGrnDetails.receivedBy}</div>
+                      )}
+
+                      <div className="flex-1 overflow-y-auto p-4 space-y-2">
+                        {viewGrnDetails.items.map((item, index) => (
+                          <div key={index} className={`p-2.5 rounded-lg border text-xs ${item.hasDiscrepancy ? "bg-red-50 border-red-200" : "bg-slate-50 border-slate-200"}`}>
+                            <div className="flex justify-between items-start">
+                              <p className="font-bold text-slate-800">{item.productName}</p>
+                              <span className="font-black text-amber-700">රු. {item.subtotal?.toFixed(2)}</span>
+                            </div>
+                            <p className="text-[10px] text-gray-500 mt-0.5">
+                              {item.orderedQty > 0 ? `${formatQtyWithUnit(item.orderedQty, item.unit)} Ordered → ` : ""}
+                              {formatQtyWithUnit(item.receivedQty, item.unit)} Received × රු.{item.costPrice?.toFixed(2)}
+                              {item.expiryDate ? ` • Exp: ${new Date(item.expiryDate).toLocaleDateString()}` : ""}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="p-4 border-t bg-amber-50 flex justify-between items-center rounded-b-xl">
+                        <span className="text-xs font-bold text-amber-800">මුළු ගණන (Grand Total):</span>
+                        <span className="text-base font-black text-amber-900">රු. {viewGrnDetails.grandTotal?.toFixed(2)}</span>
+                      </div>
                     </div>
                   </div>
                 )}
