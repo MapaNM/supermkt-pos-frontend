@@ -186,6 +186,16 @@ function App() {
   const [lastCompletedSale, setLastCompletedSale] = useState(null);
   const [showSaleCompleteModal, setShowSaleCompleteModal] = useState(false);
 
+  // 🆕 SPEED: "Auto-print Receipt" toggle - on කරාම, checkout සාර්ථක වුනු ගමන්ම receipt එක
+  // ක්ෂණිකව print වේ (cashier ට "Print" button එක click කරන්න වෙන්නේ නෑ). Device එකේම (localStorage)
+  // persist වේ - terminal එකකට connect කරලා තියෙන thermal printer එකක් නැත්නම් off කරගන්න පුළුවන්.
+  const [autoPrintReceipt, setAutoPrintReceipt] = useState(() => {
+    try { return localStorage.getItem("pos_autoPrintReceipt") === "true"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("pos_autoPrintReceipt", String(autoPrintReceipt)); } catch {}
+  }, [autoPrintReceipt]);
+
   // 🆕 RECENT BILLS QUEUE: Print කරපු/නොකරපු *හැම* bill එකක්ම (current session එකේ විතරක් නෙවෙයි)
   // මෙතන store වෙනවා - cashier ට පස්සේ ඕන වෙලාවක (hours කිහිපයකට පස්සේ වුනත්, shift මාරු වුනත්)
   // හොයාගෙන print කරගන්න පුළුවන්. Device එකේම localStorage එකේ persist වෙනවා, දවස් 3කට පස්සේ
@@ -214,6 +224,22 @@ function App() {
   useEffect(() => {
     try { localStorage.setItem("pos_recent_bills", JSON.stringify(recentBills)); } catch {}
   }, [recentBills]);
+
+  // 🆕 SHIFT / CASH DRAWER RECONCILIATION: Cashier කෙනෙක් Opening Float එකක් සටහන් කරලා Shift එකක්
+  // "Open" කරනවා, වැඩ ඉවර උනාම Actual Counted Cash එක දාලා "Close" කරනවා - backend එකම ඒ කාලය
+  // තුළ වුනු Cash Sales/Refunds වලින් Expected Cash එක ගණනය කරලා Over/Short එක පෙන්වනවා.
+  const [activeShift, setActiveShift] = useState(null); // null = Shift එකක් Open කරලා නෑ
+  const [isLoadingShift, setIsLoadingShift] = useState(true);
+  const [showStartShiftModal, setShowStartShiftModal] = useState(false);
+  const [startShiftFloat, setStartShiftFloat] = useState("");
+  const [showEndShiftModal, setShowEndShiftModal] = useState(false);
+  const [closingCountedCash, setClosingCountedCash] = useState("");
+  const [shiftCloseResult, setShiftCloseResult] = useState(null); // Close කරාට පස්සේ Over/Short summary එක පෙන්වන්න
+
+  // 🆕 Admin "Shift History" tab states
+  const [shiftHistory, setShiftHistory] = useState([]);
+  const [isLoadingShiftHistory, setIsLoadingShiftHistory] = useState(false);
+  const [shiftHistoryFilters, setShiftHistoryFilters] = useState({ cashier: "", from: "", to: "" });
 
   // 🆕 MULTI-PRICE POPUP: Scan/Search කරන භාණ්ඩයට Price Batches කිහිපයක් තියෙනවා නම්, තෝරාගන්න popup එකට
   const [multiPricePopup, setMultiPricePopup] = useState(null); // holds the product pending price selection
@@ -245,7 +271,7 @@ function App() {
   const [customerForm, setCustomerForm] = useState({ name: "", phone: "" });
   const [isEditingCustomer, setIsEditingCustomer] = useState(false);
   const [editCustomerId, setEditCustomerId] = useState(null);
-  const [creditPayment, setCreditPayment] = useState({ customerId: "", amount: "" });
+  const [creditPayment, setCreditPayment] = useState({ customerId: "", amount: "", paymentMethod: "Cash" });
 
   // 🛠️ NEW: Supplier Management States
   const [suppliers, setSuppliers] = useState([]);
@@ -269,7 +295,7 @@ function App() {
 
   const [viewSupplierDetails, setViewSupplierDetails] = useState(null); // 🛠️ NEW: Supplier details modal එකට (ledger history)
   const [viewCustomerDetails, setViewCustomerDetails] = useState(null); // 🆕 Customer credit ledger modal එකට (customer _id)
-  const [supplierPayment, setSupplierPayment] = useState({ supplierId: "", amount: "" });
+  const [supplierPayment, setSupplierPayment] = useState({ supplierId: "", amount: "", paymentMethod: "Cash" });
 
   // 🛠️ NEW: Live Customer Search (Suggestions Dropdown) States
   const [customerSuggestions, setCustomerSuggestions] = useState([]);
@@ -417,6 +443,7 @@ function App() {
         fetchStaffUsers(); // 🆕 Cashier/Staff Account list
       }
       fetchExpiringProducts();
+      fetchCurrentShift(); // 🆕 Login වුනාම/Page refresh එකකදී, දැනට Open Shift එකක් තියෙනවද බලයි
     }
   }, [user]);
 
@@ -456,6 +483,13 @@ function App() {
   useEffect(() => {
     if (!(user?.role === "admin" && activeTab === "admin" && adminSubTab === "grnHistory")) return;
     fetchGrnHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, activeTab, adminSubTab]);
+
+  // 🆕 Shift History tab එක open කරාම ලැයිස්තුව load කරයි
+  useEffect(() => {
+    if (!(user?.role === "admin" && activeTab === "admin" && adminSubTab === "shiftHistory")) return;
+    fetchShiftHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, activeTab, adminSubTab]);
 
@@ -541,7 +575,7 @@ useEffect(() => {
 
   useEffect(() => {
     const handleOnline = async () => {
-      showToast("🔄 අන්තර්ජාලය නැවත ලැබුණි! දත්ත සමගාමී (Sync) කරයි...", "warning");
+      showToast("🔄 Internet Restored! Data syncing...", "warning");
       
       // Pending බිල්පත් ලැයිස්තුව ලබා ගනී
       const pendingSales = await db.offlineSales.where('status').equals('pending').toArray();
@@ -869,14 +903,20 @@ useEffect(() => {
 
   const handleSettleCredit = async (e) => {
     e.preventDefault();
+    // 🆕 Shift එකක් Open නැතිව Cash ගෙවීමක් record කරන්න හදනවා නම් - ඒක Shift Close එකේ Cash Drawer
+    // ගණනයට ඇතුලත් වෙන්නේ නෑ කියලා cashier ට කලින්ම දැනුම් දී තහවුරු කරගනී
+    if ((creditPayment.paymentMethod || "Cash") === "Cash" && !activeShift) {
+      if (!window.confirm("⚠️ දැනට Shift එකක් Open කරලා නෑ.\n\nමේ Cash ගෙවීම කිසිම Shift එකක Cash Drawer ගණනයට ඇතුලත් වෙන්නේ නෑ.\n\nඒත් ගෙවීම සටහන් කරන්නද?")) return;
+    }
     try {
       // 🆕 backend එකෙන් ආපු message එකම පාවිච්චි කරයි - ණයට වඩා වැඩි මුදලක් ගෙව්වොත්,
       // "ආපසු දෙන්න ඕන මුදල: රු.X" කියලා server එකෙන් එවන note එක cashier ට මෙතනින්ම පේනවා
       const response = await axios.post(`${API_BASE_URL}/customers/pay-credit/${creditPayment.customerId}`, {
-        amount: creditPayment.amount
+        amount: creditPayment.amount,
+        paymentMethod: creditPayment.paymentMethod || "Cash"
       });
       showToast(response.data.message || "ණය මුදල සාර්ථකව කපා හැරියා! 🎉", response.data.changeGiven > 0 ? "warning" : "success");
-      setCreditPayment({ customerId: "", amount: "" });
+      setCreditPayment({ customerId: "", amount: "", paymentMethod: "Cash" });
       fetchCustomers();
     } catch (error) { showToast(error.response?.data?.message || "ණය පියවීම අසාර්ථකයි!", "error"); }
   };
@@ -1079,14 +1119,20 @@ useEffect(() => {
   // 🛠️ NEW: Supplier ට මුදල් ගෙවීම (Balance Due අඩු කරයි)
   const handleSettleSupplierPayment = async (e) => {
     e.preventDefault();
+    // 🆕 Shift එකක් Open නැතිව Cash ගෙවීමක් record කරන්න හදනවා නම් - Drawer ගණනයෙන් අඩු වෙන්නේ නෑ
+    // කියලා කලින්ම දැනුම් දී තහවුරු කරගනී
+    if ((supplierPayment.paymentMethod || "Cash") === "Cash" && !activeShift) {
+      if (!window.confirm("⚠️ දැනට Shift එකක් Open කරලා නෑ.\n\nමේ Cash ගෙවීම කිසිම Shift එකක Cash Drawer ගණනයෙන් අඩු වෙන්නේ නෑ.\n\nඒත් ගෙවීම සටහන් කරන්නද?")) return;
+    }
     try {
       // 🆕 backend එකෙන් ආපු message එකම පාවිච්චි කරයි - ණයට වඩා වැඩි මුදලක් ගෙව්වොත්,
       // "ආපසු ලැබෙන්න ඕන මුදල: රු.X" කියලා server එකෙන් එවන note එක මෙතනින්ම පේනවා
       const response = await axios.post(`${API_BASE_URL}/suppliers/pay/${supplierPayment.supplierId}`, {
-        amount: supplierPayment.amount
+        amount: supplierPayment.amount,
+        paymentMethod: supplierPayment.paymentMethod || "Cash"
       });
       showToast(response.data.message || "ගෙවීම සාර්ථකව සටහන් කලා! 💵", response.data.changeGiven > 0 ? "warning" : "success");
-      setSupplierPayment({ supplierId: "", amount: "" });
+      setSupplierPayment({ supplierId: "", amount: "", paymentMethod: "Cash" });
       fetchSuppliers();
     } catch (error) { showToast(error.response?.data?.message || "ගෙවීම අසාර්ථකයි!", "error"); }
   };
@@ -1370,22 +1416,27 @@ useEffect(() => {
   };
 
   // 🆕 Item-level discounts විතරක් apply කරපු Subtotal එක (Bill-level Discount එකට කලින්)
-  const calculateSubtotal = () => cart.reduce((total, item) => {
+  // 🛠️ ROUNDING FIX: Server (productRoutes.js /checkout) එකත් මේකම කරනවා - unit discount -> line total ->
+  // subtotal -> bill discount -> total හැම පියවරකම cents 2කට round කරලා, Receipt/POS total එකයි
+  // Sales Report එකේ බිල් මුදලයි cent එකක්වත් වෙනස් නොවෙන්න.
+  const money = (n) => Math.round((parseFloat(n) || 0) * 100) / 100;
+  const unitDiscountAmount = (item) => {
     const discP = parseFloat(item.discountPercent || item.discount) || 0;
-    const originalP = parseFloat(item.price);
-    const discountAmount = (originalP * discP) / 100;
-    const finalPrice = originalP - discountAmount;
-    return total + (finalPrice * parseFloat(item.qty || 0));
-  }, 0);
+    return money((parseFloat(item.price) * discP) / 100);
+  };
+  const calculateSubtotal = () => money(cart.reduce((total, item) => {
+    const finalPrice = parseFloat(item.price) - unitDiscountAmount(item);
+    return total + money(finalPrice * parseFloat(item.qty || 0));
+  }, 0));
 
   // 🆕 Applied Occasion Promotion එකේ රුපියල් අගය
   const calculateBillDiscountAmount = () => {
     if (!appliedBillDiscount) return 0;
-    return calculateSubtotal() * (appliedBillDiscount.percent / 100);
+    return money(calculateSubtotal() * (appliedBillDiscount.percent / 100));
   };
 
   // 🛠️ UPDATED: Bill-level Discount එකත් අඩු කරලා තමයි Final Total එක - Checkout/Print/Cash-validation ඔක්කොම මෙතනින්ම derive වේ
-  const calculateTotal = () => Math.max(0, calculateSubtotal() - calculateBillDiscountAmount());
+  const calculateTotal = () => Math.max(0, money(calculateSubtotal() - calculateBillDiscountAmount()));
 
   const handleCheckoutAndPrint = async () => {
     if (cart.length === 0) return showToast("බිල හිස්ව පවතී!", "warning");
@@ -1431,7 +1482,7 @@ useEffect(() => {
         ...item,
         _id: item.isTemporary ? null : item._id,
         batchId: item.batchId || null, // 🆕 Multi-Price: තෝරාගත් Batch එකෙන්ම තොගය අඩුවෙන්න server එකට යවයි
-        discount: (parseFloat(item.price) * discP) / 100 
+        discount: unitDiscountAmount(item)
       };
     });
 
@@ -1480,13 +1531,20 @@ useEffect(() => {
       // 🌐 ONLINE: සර්වර් එකට දත්ත යැවීමට උත්සාහ කරයි
       const checkoutResponse = await axios.post(`${API_BASE_URL}/products/checkout`, checkoutData);
 
-      // 🆕 auto-print කරනවා වෙනුවට, "Sale Complete" modal එකක් පෙන්නලා cashier ට තීරණය කරන්න
-      // ඉඩ දෙනවා - Print කරනවද, නැත්නම් කෙලින්ම ඊළඟ බිලට යනවද.
+      // 🆕 auto-print toggle off නම්, "Sale Complete" modal එකක් පෙන්නලා cashier ට තීරණය කරන්න
+      // ඉඩ දෙනවා - Print කරනවද, නැත්නම් කෙලින්ම ඊළඟ බිලට යනවද. On නම්, ක්ෂණිකව print කරයි.
       const completedSale = buildSaleSnapshot(checkoutResponse.data.invoiceNo || null, false);
-      setLastCompletedSale(completedSale);
-      setShowSaleCompleteModal(true);
+      flushSync(() => {
+        setLastCompletedSale(completedSale);
+        setShowSaleCompleteModal(true);
+      });
       // 🆕 Print කරේවත් නැතත්, මේ bill එකම "Recent Bills" queue එකටත් එකතු කරයි - පස්සේ ඕන වෙලාවක print කරගන්න
       setRecentBills((prev) => pruneRecentBills([completedSale, ...prev]));
+      // 🆕 SPEED: Auto-print on නම්, flushSync එකෙන් receipt DOM එක update වෙලා ඉවර නිසා, ක්ෂණිකව print කරයි
+      if (autoPrintReceipt) {
+        window.print();
+        setRecentBills((prev) => prev.map((b) => (b.id === completedSale.id ? { ...b, printed: true } : b)));
+      }
       resetBillingUI();
       fetchProducts();
       fetchCustomers();
@@ -1506,11 +1564,17 @@ useEffect(() => {
 
           // 🆕 Offline බිලකට තාවකාලික Reference එකක් පමණි - Sync වුනාට පස්සේ විතරක් සැබෑ Invoice Number එකක් ලැබෙන්නේ
           const offlineCompletedSale = buildSaleSnapshot(`OFFLINE-${Date.now()}`, true);
-          setLastCompletedSale(offlineCompletedSale);
-          setShowSaleCompleteModal(true);
+          flushSync(() => {
+            setLastCompletedSale(offlineCompletedSale);
+            setShowSaleCompleteModal(true);
+          });
           setRecentBills((prev) => pruneRecentBills([offlineCompletedSale, ...prev]));
+          if (autoPrintReceipt) {
+            window.print();
+            setRecentBills((prev) => prev.map((b) => (b.id === offlineCompletedSale.id ? { ...b, printed: true } : b)));
+          }
           resetBillingUI();
-          showToast("⚠️ ඉන්ටර්නෙට් නොමැත! බිල ආරක්ෂිතව බ්‍රවුසර් එකේ සේව් කලා. 📴", "warning");
+          showToast("⚠️ No Internet! Bill Saved in to Browser. 📴", "warning");
           
         } catch (dbError) {
           showToast("Local Database එකට සේව් කිරීම අසාර්ථකයි!", "error");
@@ -1545,6 +1609,75 @@ useEffect(() => {
     });
     window.print();
     setRecentBills((prev) => prev.map((b) => (b.id === billId ? { ...b, printed: true } : b)));
+  };
+
+  // 🆕 SHIFT / CASH DRAWER RECONCILIATION -----------------------------------------------
+
+  // Login වුනාම/Page refresh එකකදී, දැනට Open Shift එකක් තියෙනවද බලන්න. නැත්නම්, Start Shift
+  // modal එක auto-show කරයි (billing screen එක block කරන්නේ නෑ - cashier කැමති නම් "Skip" කරලා
+  // පස්සේ header එකේම "Start Shift" button එකෙන් කරගන්න පුළුවන්, existing workflow එකක් කඩන්නේ නෑ).
+  const fetchCurrentShift = async () => {
+    setIsLoadingShift(true);
+    try {
+      const response = await axios.get(`${API_BASE_URL}/shifts/current`);
+      setActiveShift(response.data || null);
+      if (!response.data) setShowStartShiftModal(true);
+    } catch (error) {
+      // Shift status ලබාගන්න බැරි උනත් (network error ආදිය), Billing screen එක block කරන්නේ නෑ
+      console.error("Shift status ලබාගැනීම අසාර්ථකයි", error);
+    } finally {
+      setIsLoadingShift(false);
+    }
+  };
+
+  const handleStartShift = async (e) => {
+    e.preventDefault();
+    try {
+      const response = await axios.post(`${API_BASE_URL}/shifts/open`, {
+        openingFloat: parseFloat(startShiftFloat) || 0,
+      });
+      setActiveShift(response.data.shift);
+      setShowStartShiftModal(false);
+      setStartShiftFloat("");
+      showToast(response.data.message || "Shift එක Open කලා! 🟢");
+    } catch (error) {
+      showToast(error.response?.data?.message || "Shift එක Open කිරීම අසාර්ථකයි!", "error");
+    }
+  };
+
+  const handleCloseShift = async (e) => {
+    e.preventDefault();
+    if (closingCountedCash === "" || parseFloat(closingCountedCash) < 0) {
+      return showToast("Drawer එකේ ගණ​න් කරපු මුදල (cash) ඇතුලත් කරන්න!", "warning");
+    }
+    try {
+      const response = await axios.post(`${API_BASE_URL}/shifts/close/${activeShift._id}`, {
+        closingCountedCash: parseFloat(closingCountedCash),
+      });
+      setShiftCloseResult(response.data.shift); // 🆕 Close කරාට පස්සේ Over/Short summary එක පෙන්වන්න
+      setActiveShift(null);
+      setClosingCountedCash("");
+      showToast(response.data.message || "Shift එක Close කලා!");
+    } catch (error) {
+      showToast(error.response?.data?.message || "Shift එක Close කිරීම අසාර්ථකයි!", "error");
+    }
+  };
+
+  // 🆕 Admin "Shift History" tab එකට
+  const fetchShiftHistory = async () => {
+    setIsLoadingShiftHistory(true);
+    try {
+      const params = {};
+      if (shiftHistoryFilters.cashier) params.cashier = shiftHistoryFilters.cashier;
+      if (shiftHistoryFilters.from) params.from = shiftHistoryFilters.from;
+      if (shiftHistoryFilters.to) params.to = shiftHistoryFilters.to;
+      const response = await axios.get(`${API_BASE_URL}/shifts/history`, { params });
+      setShiftHistory(response.data);
+    } catch (error) {
+      showToast("Shift History ලබාගැනීම අසාර්ථකයි!", "error");
+    } finally {
+      setIsLoadingShiftHistory(false);
+    }
   };
 
   // 🆕 HOLD BILL: වත්මන් cart එක (customer, payment prefs ඇතුලුව) Hold කරලා, අලුත් හිස් බිලක්
@@ -2432,6 +2565,130 @@ useEffect(() => {
         </div>
       )}
 
+      {/* ══════════ 🆕 START SHIFT MODAL ══════════ */}
+      {showStartShiftModal && (
+        <div
+          className="fixed inset-0 z-100 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm print:hidden"
+          onClick={() => setShowStartShiftModal(false)}
+        >
+          <div
+            className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 bg-linear-to-r from-emerald-600 to-emerald-700 flex items-center justify-between">
+              <h3 className="text-sm font-black text-white">🟢 Shift එක Start කරන්න</h3>
+              <button onClick={() => setShowStartShiftModal(false)} className="text-white/80 hover:text-white text-lg leading-none">✕</button>
+            </div>
+            <form onSubmit={handleStartShift} className="p-5 space-y-3">
+              <p className="text-[12px] text-gray-500">Cash Drawer එකේ දැනට තියෙන ආරම්භක මුදල (Opening Float) ඇතුලත් කරන්න.</p>
+              <div>
+                <label className="text-[11px] font-bold text-gray-600 block mb-1">Opening Float (රු.):</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  autoFocus
+                  required
+                  value={startShiftFloat}
+                  onChange={(e) => setStartShiftFloat(e.target.value)}
+                  placeholder="0.00"
+                  className="w-full p-2.5 border rounded-lg text-sm font-black text-emerald-700 bg-gray-50 focus:bg-white"
+                />
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button type="button" onClick={() => setShowStartShiftModal(false)} className="flex-1 bg-gray-100 text-gray-600 py-2.5 rounded-lg text-xs font-bold">Later</button>
+                <button type="submit" className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 rounded-lg text-xs font-bold">🟢 Shift Start</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════ 🆕 END SHIFT MODAL ══════════ */}
+      {showEndShiftModal && activeShift && (
+        <div
+          className="fixed inset-0 z-100 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm print:hidden"
+          onClick={() => setShowEndShiftModal(false)}
+        >
+          <div
+            className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 bg-linear-to-r from-rose-600 to-rose-700 flex items-center justify-between">
+              <h3 className="text-sm font-black text-white">🔴 Shift එක End කරන්න</h3>
+              <button onClick={() => setShowEndShiftModal(false)} className="text-white/80 hover:text-white text-lg leading-none">✕</button>
+            </div>
+            <form onSubmit={async (e) => { await handleCloseShift(e); setShowEndShiftModal(false); }} className="p-5 space-y-3">
+              <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-[11px] text-slate-600">
+                <div className="flex justify-between"><span>Opening Float:</span><span className="font-bold">රු. {activeShift.openingFloat?.toFixed(2)}</span></div>
+                <div className="flex justify-between"><span>Started:</span><span className="font-bold">{new Date(activeShift.openedAt).toLocaleString()}</span></div>
+              </div>
+              <p className="text-[12px] text-gray-500">Cash Drawer එක physically ගණ​න් කරලා, එහි ඇ​ති මුළු (Cash) මුදල මෙතන​ට ඇතුලත් කරන්න.</p>
+              <div>
+                <label className="text-[11px] font-bold text-gray-600 block mb-1">Cash Drawer හි ඇ​ති මුදල (රු.):</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  autoFocus
+                  required
+                  value={closingCountedCash}
+                  onChange={(e) => setClosingCountedCash(e.target.value)}
+                  placeholder="0.00"
+                  className="w-full p-2.5 border rounded-lg text-sm font-black text-rose-700 bg-gray-50 focus:bg-white"
+                />
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button type="button" onClick={() => setShowEndShiftModal(false)} className="flex-1 bg-gray-100 text-gray-600 py-2.5 rounded-lg text-xs font-bold">Later</button>
+                <button type="submit" className="flex-1 bg-rose-600 hover:bg-rose-700 text-white py-2.5 rounded-lg text-xs font-bold">🔴 Shift End</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════ 🆕 SHIFT CLOSE RESULT MODAL (Over/Short Summary) ══════════ */}
+      {shiftCloseResult && (
+        <div
+          className="fixed inset-0 z-100 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm print:hidden"
+          onClick={() => setShiftCloseResult(null)}
+        >
+          <div
+            className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className={`px-5 py-4 flex items-center justify-between ${
+              shiftCloseResult.overShort === 0 ? "bg-linear-to-r from-emerald-600 to-emerald-700" :
+              shiftCloseResult.overShort > 0 ? "bg-linear-to-r from-blue-600 to-blue-700" :
+              "bg-linear-to-r from-red-600 to-red-700"
+            }`}>
+              <h3 className="text-sm font-black text-white">📋 Shift Summary</h3>
+              <button onClick={() => setShiftCloseResult(null)} className="text-white/80 hover:text-white text-lg leading-none">✕</button>
+            </div>
+            <div className="p-5 space-y-2 text-[12px]">
+              <div className="flex justify-between"><span className="text-gray-500">Opening Float:</span><span className="font-bold">රු. {shiftCloseResult.openingFloat?.toFixed(2)}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">+ Cash Sales:</span><span className="font-bold text-emerald-700">රු. {shiftCloseResult.cashSales?.toFixed(2)}</span></div>
+              <div className="flex justify-between"><span className="text-amber-700">Credit Amount :</span><span className="font-bold text-amber-700">රු. {(shiftCloseResult.creditGiven || 0).toFixed(2)}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">− Cash Refunds:</span><span className="font-bold text-red-600">රු. {shiftCloseResult.cashRefunds?.toFixed(2)}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">+ Customer Credit (Cash):</span><span className="font-bold text-emerald-700">රු. {(shiftCloseResult.creditPaymentsCashIn || 0).toFixed(2)}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">− Supplier Payment (Cash):</span><span className="font-bold text-red-600">රු. {(shiftCloseResult.supplierPaymentsCashOut || 0).toFixed(2)}</span></div>
+              <hr className="my-1.5" />
+              <div className="flex justify-between"><span className="text-gray-600 font-bold">Expected Cash:</span><span className="font-black">රු. {shiftCloseResult.expectedCash?.toFixed(2)}</span></div>
+              <div className="flex justify-between"><span className="text-gray-600 font-bold">Counted Cash:</span><span className="font-black">රු. {shiftCloseResult.closingCountedCash?.toFixed(2)}</span></div>
+              <div className={`mt-2 p-3 rounded-lg text-center font-black text-sm ${
+                shiftCloseResult.overShort === 0 ? "bg-emerald-50 text-emerald-700" :
+                shiftCloseResult.overShort > 0 ? "bg-blue-50 text-blue-700" :
+                "bg-red-50 text-red-700"
+              }`}>
+                {shiftCloseResult.overShort === 0 ? "✅ Exact ගැලපේ!" :
+                  shiftCloseResult.overShort > 0 ? `🔵 Over: රු. ${shiftCloseResult.overShort.toFixed(2)}` :
+                  `🔴 Short: රු. ${Math.abs(shiftCloseResult.overShort).toFixed(2)}`}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ══════════ 🆕 HELD BILLS PANEL ══════════ */}
       {showHeldBillsPanel && (
         <div
@@ -2925,6 +3182,19 @@ useEffect(() => {
                       <span className="text-[16px] font-800 tracking-tight">Complete &amp; print</span>
                       <span className="text-[11px] font-600 text-white/70">F12</span>
                     </button>
+
+                    {/* 🆕 SPEED: Auto-print toggle - on කරාම, checkout සාර්ථක වුනු ගමන්ම receipt එක
+                        ක්ෂණිකව print වේ, "Print" button එක click කරන්න ඕන නෑ. Device එකේම localStorage
+                        එකේ persist වේ. */}
+                    <label className="mt-2 flex items-center justify-center gap-1.5 text-[11px] font-600 text-ink2/60 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoPrintReceipt}
+                        onChange={(e) => setAutoPrintReceipt(e.target.checked)}
+                        className="w-3.5 h-3.5 accent-accent"
+                      />
+                      🖨️ Auto-print receipt
+                    </label>
                   </div>
                 </div>
               </div>
@@ -2952,6 +3222,28 @@ useEffect(() => {
           <div className="flex-1"></div>
 
           <div className="flex items-center gap-3 text-[12px]">
+            {/* 🆕 SHIFT STATUS: Open Shift එකක් තියෙනවනම් green pill + "End Shift", නැත්නම් "Start Shift" button එක */}
+            {!isLoadingShift && (
+              activeShift ? (
+                <button
+                  onClick={() => setShowEndShiftModal(true)}
+                  className="h-7 px-2.5 rounded-md text-[12px] font-600 bg-accent-soft text-accent-hi hover:brightness-95 transition-colors flex items-center gap-1.5"
+                  title={`Shift Open • Float රු.${activeShift.openingFloat?.toFixed(2)} • ${new Date(activeShift.openedAt).toLocaleTimeString()} ඉඳන්`}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-accent-hi"></span>
+                  Shift Open
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowStartShiftModal(true)}
+                  className="h-7 px-2.5 rounded-md text-[12px] font-600 bg-gold-soft text-gold hover:brightness-95 transition-colors flex items-center gap-1.5"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-gold"></span>
+                  Start Shift
+                </button>
+              )
+            )}
+            <span className="text-white/25">|</span>
             <span className="flex items-center gap-1.5 text-white/60">
               <span className={`w-1.5 h-1.5 rounded-full ${isOnline ? "bg-accent-hi" : "bg-gold"}`}></span>
               {isOnline ? "Online" : "Offline"}
@@ -3355,23 +3647,23 @@ useEffect(() => {
                     {/* Sale Info Card */}
                     <div className="bg-white p-4 rounded-xl border shadow-xs flex flex-wrap justify-between items-center gap-3">
                       <div>
-                        <p className="text-[10px] text-gray-400 font-bold">බිල්පත් අංකය</p>
+                        <p className="text-[10px] text-gray-400 font-bold">Bill Number</p>
                         <p className="font-mono text-xs font-bold text-slate-800">{returnSaleData.invoiceNo || returnSaleData._id}</p>
                       </div>
                       <div>
-                        <p className="text-[10px] text-gray-400 font-bold">දිනය</p>
+                        <p className="text-[10px] text-gray-400 font-bold">Date</p>
                         <p className="text-xs font-bold text-slate-800">{new Date(returnSaleData.createdAt).toLocaleString()}</p>
                       </div>
                       <div>
-                        <p className="text-[10px] text-gray-400 font-bold">කැෂියර්</p>
+                        <p className="text-[10px] text-gray-400 font-bold">Cashier</p>
                         <p className="text-xs font-bold text-slate-800">{returnSaleData.cashier}</p>
                       </div>
                       <div>
-                        <p className="text-[10px] text-gray-400 font-bold">ගෙවීම් ක්‍රමය</p>
+                        <p className="text-[10px] text-gray-400 font-bold">Payment Method</p>
                         <p className="text-xs font-bold text-slate-800">{returnSaleData.paymentMethod}{returnSaleData.customerId ? ` (${returnSaleData.customerId.name})` : ""}</p>
                       </div>
                       <div>
-                        <p className="text-[10px] text-gray-400 font-bold">මුළු එකතුව</p>
+                        <p className="text-[10px] text-gray-400 font-bold">Total Amount</p>
                         <p className="text-sm font-black text-blue-600">රු. {returnSaleData.totalAmount.toFixed(2)}</p>
                       </div>
                       <div>
@@ -3445,7 +3737,7 @@ useEffect(() => {
                         {/* Mode + Refund Method */}
                         <div className="bg-white p-4 rounded-xl border shadow-xs flex flex-wrap gap-4 items-end">
                           <div>
-                            <p className="text-[11px] font-bold text-gray-600 mb-1">ක්‍රියාව තෝරන්න:</p>
+                            <p className="text-[11px] font-bold text-gray-600 mb-1">Select Action:</p>
                             <div className="flex bg-gray-100 rounded-lg p-1">
                               <button onClick={() => setIsExchangeMode(false)} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${!isExchangeMode ? "bg-white shadow text-blue-600" : "text-gray-500"}`}>↩️ Return Only</button>
                               <button onClick={() => setIsExchangeMode(true)} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${isExchangeMode ? "bg-white shadow text-amber-600" : "text-gray-500"}`}>🔁 Exchange</button>
@@ -3578,6 +3870,7 @@ useEffect(() => {
                 <button onClick={() => setAdminSubTab("promotions")} className={`p-3 text-left font-bold ${adminSubTab === "promotions" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🎉 Special Discounts</button>
                 <button onClick={() => setAdminSubTab("suppliers")} className={`p-3 text-left font-bold ${adminSubTab === "suppliers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚚 Suppliers</button>
                 <button onClick={() => setAdminSubTab("grnHistory")} className={`p-3 text-left font-bold ${adminSubTab === "grnHistory" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📋 GRN History</button>
+                <button onClick={() => setAdminSubTab("shiftHistory")} className={`p-3 text-left font-bold ${adminSubTab === "shiftHistory" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🧾 Shift History</button>
                 <button onClick={() => setAdminSubTab("reorder")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "reorder" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
                   <span>🔔 Low-Stock Alerts</span>
                   {lowStockProducts.length > 0 && (
@@ -3941,7 +4234,7 @@ useEffect(() => {
                   <div className="space-y-6">
                     <div className="bg-white p-5 rounded-xl border shadow-xs">
                       <h3 className="text-sm font-black uppercase text-slate-800 mb-1">🔔 Low-Stock Alerts</h3>
-                      <p className="text-xs text-gray-500">අවම තොග මට්ටමට වඩා අඩුවෙලා තියෙන භාණ්ඩ, Supplier අනුව Group කර පෙන්වයි</p>
+                      <p className="text-xs text-gray-500">අවම තොග මට්ටමට වඩා අඩුවෙලා තියෙන භාණ්ඩ</p>
                     </div>
 
                     {lowStockProducts.length === 0 ? (
@@ -3959,7 +4252,7 @@ useEffect(() => {
                               <h4 className="text-xs font-black uppercase text-slate-800">
                                 {supplier ? `🚚 ${supplier.name}` : "❓ Supplier නොමැති භාණ්ඩ"}
                               </h4>
-                              <p className="text-[10px] text-gray-400 mt-0.5">{productsGroup.length} භාණ්ඩයක් Reorder කරන්න ඕන</p>
+                              <p className="text-[10px] text-gray-400 mt-0.5">Items {productsGroup.length} Reorder කරන්න ඕන</p>
                             </div>
                             <table className="w-full text-left border-collapse text-xs">
                               <thead>
@@ -4009,7 +4302,7 @@ useEffect(() => {
                               <th className="p-3">භාණ්ඩයේ නම</th>
                               <th className="p-3 text-center">වත්මන් තොගය</th>
                               <th className="p-3 text-center">Expiry Date</th>
-                              <th className="p-3 text-center">තත්ත්වය</th>
+                              <th className="p-3 text-center">Status</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100 font-medium">
@@ -4038,7 +4331,7 @@ useEffect(() => {
                     <div className="bg-white p-5 rounded-xl border shadow-xs flex justify-between items-start gap-4">
                       <div>
                         <h3 className="text-sm font-black uppercase text-slate-800 mb-1">🆕 Unregistered Items</h3>
-                        <p className="text-xs text-gray-500">"හදිසි අවස්ථා" එකෙන් Database එකට Register නොකර විකුණපු භාණ්ඩ ලැයිස්තුව — Review කරලා, ඕන ඒවා Catalog එකට Register කරන්න.</p>
+                        {/* <p className="text-xs text-gray-500">"හදිසි අවස්ථා" එකෙන් Database එකට Register නොකර විකුණපු භාණ්ඩ ලැයිස්තුව — Review කරලා, ඕන ඒවා Catalog එකට Register කරන්න.</p> */}
                       </div>
                       {unregisteredItemGroups.length > 0 && (
                         <button onClick={handleClearAllUnregisteredItems} className="bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 px-3 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all">🧹 සියල්ල ඉවත් කරන්න</button>
@@ -4061,7 +4354,7 @@ useEffect(() => {
                               <th className="p-3 text-center">කී වතාවක් Sell වුනාද</th>
                               <th className="p-3 text-right">සාමාන්‍ය මිල</th>
                               <th className="p-3 text-center">අන්තිමට Sell වුනු දිනය</th>
-                              <th className="p-3 text-center">ක්‍රියාවන්</th>
+                              <th className="p-3 text-center">Action</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100 font-medium">
@@ -4111,7 +4404,7 @@ useEffect(() => {
                               <th className="p-3">දිනය</th>
                               <th className="p-3">මුල් බිල් අංකය</th>
                               <th className="p-3">වර්ගය</th>
-                              <th className="p-3">කැෂියර්</th>
+                              <th className="p-3">Cashier</th>
                               <th className="p-3">භාණ්ඩ</th>
                               <th className="p-3">Refund ක්‍රමය</th>
                               <th className="p-3 text-right">Refund මුදල</th>
@@ -4179,6 +4472,17 @@ useEffect(() => {
                             ))}
                           </select>
                           <input type="number" required placeholder="පියවන ලද මුදල (රු.)" value={creditPayment.amount} onChange={(e) => setCreditPayment({ ...creditPayment, amount: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-emerald-700" />
+                          {/* 🆕 SHIFT RECONCILIATION: Payment Method තෝරගන්න - "Cash" ගෙවීම් විතරයි Cashier ගේ
+                              Shift Close Cash Drawer ගණනයට (Expected Cash) ඇතුලත් වෙන්නේ */}
+                          <select value={creditPayment.paymentMethod} onChange={(e) => setCreditPayment({ ...creditPayment, paymentMethod: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 text-gray-700 font-bold">
+                            <option value="Cash">💵 මුදල් (Cash)</option>
+                            <option value="Card">💳 කාඩ්පත (Card)</option>
+                            <option value="Bank Transfer">🏦 බැංකු හුවමාරුව (Bank Transfer)</option>
+                            <option value="Other">🔁 වෙනත් (Other)</option>
+                          </select>
+                          {(creditPayment.paymentMethod || "Cash") === "Cash" && !activeShift && (
+                            <p className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">⚠️ Shift එකක් Open නෑ - මේ Cash ගෙවීම Cash Drawer ගණනයට ඇතුලත් වෙන්නේ නෑ</p>
+                          )}
                           {/* 🆕 FIX: තෝරපු customer ට දැනටමත් ණයක් නැත්නම්, submit button එක disable කරලා
                               clear message එකක් පෙන්වනවා - backend එකේදී fail වෙනකම් බලාගෙන ඉන්න ඕන නෑ */}
                           {(() => {
@@ -4499,6 +4803,17 @@ useEffect(() => {
                             ))}
                           </select>
                           <input type="number" required placeholder="ගෙවන ලද මුදල (රු.)" value={supplierPayment.amount} onChange={(e) => setSupplierPayment({ ...supplierPayment, amount: e.target.value })} className="w-full p-2 border rounded text-xs font-black text-emerald-700" />
+                          {/* 🆕 SHIFT RECONCILIATION: Payment Method තෝරගන්න - "Cash" ගෙවීම් විතරයි Cashier ගේ
+                              Shift Close Cash Drawer ගණනයෙන් අඩු වෙන්නේ (Expected Cash) */}
+                          <select value={supplierPayment.paymentMethod} onChange={(e) => setSupplierPayment({ ...supplierPayment, paymentMethod: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 text-gray-700 font-bold">
+                            <option value="Cash">💵 මුදල් (Cash)</option>
+                            <option value="Card">💳 කාඩ්පත (Card)</option>
+                            <option value="Bank Transfer">🏦 බැංකු හුවමාරුව (Bank Transfer)</option>
+                            <option value="Other">🔁 වෙනත් (Other)</option>
+                          </select>
+                          {(supplierPayment.paymentMethod || "Cash") === "Cash" && !activeShift && (
+                            <p className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">⚠️ Shift එකක් Open නෑ - මේ Cash ගෙවීම Cash Drawer ගණනයෙන් අඩු වෙන්නේ නෑ</p>
+                          )}
                           {/* 🆕 FIX: තෝරපු supplier ට ගෙවීමට මුදලක් නැත්නම්, submit button එක disable කරයි */}
                           {(() => {
                             const selectedSupplierForPayment = suppliers.find((s) => s._id === supplierPayment.supplierId);
@@ -4617,6 +4932,90 @@ useEffect(() => {
                               <td className="p-3 text-right font-black text-amber-700">රු. {g.grandTotal?.toFixed(2)}</td>
                               <td className="p-3 text-center">
                                 <button onClick={(e) => { e.stopPropagation(); handlePrintGrn(g); }} className="bg-slate-700 hover:bg-slate-800 text-white px-2 py-1 rounded text-[10px] font-bold">🖨️ Print</button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* 🆕 SHIFT HISTORY: Cash Drawer Reconciliation records - Over/Short at a glance */}
+                {adminSubTab === "shiftHistory" && (
+                  <div className="p-6 space-y-4">
+                    <div className="bg-white p-4 rounded-xl border shadow-xs">
+                      <h3 className="text-xs font-black uppercase text-slate-800 mb-3">🧾 Shift History (Cash Drawer Reconciliation)</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                        <select
+                          value={shiftHistoryFilters.cashier}
+                          onChange={(e) => setShiftHistoryFilters({ ...shiftHistoryFilters, cashier: e.target.value })}
+                          className="p-2 border rounded text-xs bg-gray-50 font-bold text-gray-700"
+                        >
+                          <option value="">All Cashiers</option>
+                          {staffUsers.map(u => <option key={u._id} value={u.username}>{u.username}</option>)}
+                        </select>
+                        <input type="date" value={shiftHistoryFilters.from} onChange={(e) => setShiftHistoryFilters({ ...shiftHistoryFilters, from: e.target.value })} className="p-2 border rounded text-xs" />
+                        <input type="date" value={shiftHistoryFilters.to} onChange={(e) => setShiftHistoryFilters({ ...shiftHistoryFilters, to: e.target.value })} className="p-2 border rounded text-xs" />
+                        <button onClick={fetchShiftHistory} className="bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold py-2">🔍 Filter</button>
+                      </div>
+                    </div>
+
+                    <div className="bg-white rounded-xl border shadow-xs overflow-hidden">
+                      {/* <p className="px-4 py-2 text-[11px] font-bold text-slate-600 bg-slate-50 border-b">
+                        Expected = Opening Float + Cash Sales (ණය බිල් වල ගෙවපු කොටසත් ඇතුලුව) − Cash Refunds + ණය ගෙවීම් (Cash) − සැපයුම්කරු ගෙවීම් (Cash). "ණයට දුන්" ගණනයට ඇතුලත් නෑ.
+                      </p> */}
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-100 text-slate-700 font-bold border-b">
+                            <th className="p-3">Cashier</th>
+                            <th className="p-3">Opened</th>
+                            <th className="p-3">Closed</th>
+                            <th className="p-3 text-right">Opening Float</th>
+                            <th className="p-3 text-right" title="Cash බිල් + ණය බිල් වලට ගෙවපු කොටස">+ Cash Sales</th>
+                            <th className="p-3 text-right">− Cash Refunds</th>
+                            <th className="p-3 text-right">+ Customer Credit (Cash)</th>
+                            <th className="p-3 text-right">− Supplier Payments (Cash)</th>
+                            <th className="p-3 text-right text-amber-700" title="ණයට ලබා දුන් මුදල (ණය Return අඩු කර) - Expected Cash එකට අදාල නෑ (Info)">Credit Amount (Net, Info)</th>
+                            <th className="p-3 text-right">= Expected</th>
+                            <th className="p-3 text-right">Counted</th>
+                            <th className="p-3 text-center">Over/Short</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 font-medium">
+                          {isLoadingShiftHistory && (
+                            <tr><td colSpan="12" className="p-6 text-center text-gray-400">Loading...</td></tr>
+                          )}
+                          {!isLoadingShiftHistory && shiftHistory.length === 0 && (
+                            <tr><td colSpan="12" className="p-6 text-center text-gray-400">No shift records found</td></tr>
+                          )}
+                          {!isLoadingShiftHistory && shiftHistory.map((s) => (
+                            <tr key={s._id} className="hover:bg-blue-50/40">
+                              <td className="p-3 font-bold text-slate-900">{s.cashier}</td>
+                              <td className="p-3 text-gray-500">{new Date(s.openedAt).toLocaleString()}</td>
+                              <td className="p-3 text-gray-500">
+                                {s.status === "open" ? (
+                                  <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">🟢 Open</span>
+                                ) : new Date(s.closedAt).toLocaleString()}
+                              </td>
+                              <td className="p-3 text-right">රු. {s.openingFloat?.toFixed(2)}</td>
+                              <td className="p-3 text-right text-emerald-700 font-bold">+ රු. {(s.cashSales || 0).toFixed(2)}</td>
+                              <td className="p-3 text-right text-red-600 font-bold">− රු. {(s.cashRefunds || 0).toFixed(2)}</td>
+                              <td className="p-3 text-right text-emerald-700 font-bold">{`+ රු. ${(s.creditPaymentsCashIn || 0).toFixed(2)}`}</td>
+                              <td className="p-3 text-right text-red-600 font-bold">{`− රු. ${(s.supplierPaymentsCashOut || 0).toFixed(2)}`}</td>
+                              <td className="p-3 text-right text-amber-700 font-bold">{`රු. ${(s.creditGiven || 0).toFixed(2)}`}{(s.creditBillCount > 0 || s.creditReturned > 0) && <span className="block text-[9px] font-medium text-amber-600">බිල් {s.creditBillCount || 0}: රු.{(s.creditGivenGross || 0).toFixed(2)}{s.creditReturned > 0 ? ` − Return රු.${s.creditReturned.toFixed(2)}` : ""}</span>}</td>
+                              <td className="p-3 text-right font-bold">{`රු. ${(s.expectedCash || 0).toFixed(2)}`}{s.isLive && <span className="ml-1 text-[9px] font-black text-emerald-600">LIVE</span>}</td>
+                              <td className="p-3 text-right font-bold">{s.status === "closed" ? `රු. ${s.closingCountedCash?.toFixed(2)}` : "-"}</td>
+                              <td className="p-3 text-center">
+                                {s.status === "closed" ? (
+                                  <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full ${
+                                    s.overShort === 0 ? "bg-emerald-100 text-emerald-700" :
+                                    s.overShort > 0 ? "bg-blue-100 text-blue-700" :
+                                    "bg-red-100 text-red-700"
+                                  }`}>
+                                    {s.overShort === 0 ? "Exact" : s.overShort > 0 ? `+රු.${s.overShort.toFixed(2)}` : `-රු.${Math.abs(s.overShort).toFixed(2)}`}
+                                  </span>
+                                ) : "-"}
                               </td>
                             </tr>
                           ))}
@@ -4874,14 +5273,14 @@ useEffect(() => {
                     {/* Sales History Log Table */}
                     <div className="bg-white rounded-xl border shadow-xs overflow-hidden">
                       <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
-                        <h3 className="text-xs font-black uppercase text-slate-800">📊 දිනපතා සිදුකල විකුණුම් ඉතිහාසය (Sales Logs)</h3>
+                        <h3 className="text-xs font-black uppercase text-slate-800">📊 Daily Sales History (Sales Logs)</h3>
                         <div className="flex items-center gap-3">
                           {/* 🆕 Voided sales stay chronological (not moved to the bottom) — this toggle
                               hides them by default so they don't clutter day-to-day scanning, but keeps
                               them one click away, in their correct time order, for the audit trail. */}
                           <label className="flex items-center gap-1.5 text-[11px] font-bold text-gray-600 cursor-pointer select-none">
                             <input type="checkbox" checked={showVoidedSales} onChange={(e) => setShowVoidedSales(e.target.checked)} className="accent-blue-600" />
-                            Voided බිල් පෙන්වන්න
+                            Show Voided Bills
                           </label>
                           {salesSummary.sales?.length > 0 && (
                             <button onClick={handleClearAllSales} className="bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 px-3 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all">🧹 සියල්ල ඉවත් කරන්න</button>
@@ -4892,12 +5291,12 @@ useEffect(() => {
                         <thead>
                           <tr className="bg-slate-100 text-slate-700 font-bold border-b">
                             <th className="p-3">Invoice No</th>
-                            <th className="p-3">දිනය සහ වේලාව</th>
-                            <th className="p-3">කැෂියර්</th>
-                            <th className="p-3">ගෙවීම් ක්‍රමය</th>
-                            <th className="p-3 text-right">බිල් මුදල</th>
-                            <th className="p-3 text-right">ලැබුණු ලාභය</th>
-                            <th className="p-3 text-center">ක්‍රියාවන්</th>
+                            <th className="p-3">Date & Time</th>
+                            <th className="p-3">Cashier</th>
+                            <th className="p-3">Payment Method</th>
+                            <th className="p-3 text-right">Bill Amount</th>
+                            <th className="p-3 text-right">Profit</th>
+                            <th className="p-3 text-center">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100 font-medium">
@@ -5024,6 +5423,15 @@ useEffect(() => {
           reset වෙලා තිබුණත් (අලුත් බිලක් දාන්න පටන් අරන් තිබුණත්) receipt එක හරියටම පෙන්වයි. */}
       {lastCompletedSale && (
       <div className="hidden print:block p-4 w-[80mm] text-black font-mono text-xs bg-white">
+        {/* 🆕 SPEED/ACCURACY FIX: @page rule එකක් කලින් තිබුණේ නෑ - ඒ නිසා content එක 80mm width එකට
+            design කරලා තිබුණත්, browser print dialog එක paper size එක default A4/Letter එකක් විදිහටම
+            සැලකුවා. Real 80mm thermal roll printer එකක print කරද්දී, ඒකෙන් receipt එකකට පස්සේ හිස්
+            කඩදාසි ගොඩක් feed වෙනවා (සහ auto-cutter එකත් වැරදි තැනකින් කපනවා). මේ @page rule එකෙන්
+            printer driver එකට කියනවා "page size එක 80mm පළල, උස auto (content එකට ගැලපෙන විදිහට)" කියලා -
+            Chrome/Edge වල Print Preview එකේ Paper Size dropdown එකේ "80mm Roll" / "Custom" තෝරගත්තොත් මේක apply වෙනවා.
+            margin: 0 කරලා තියෙන්නේ thermal printer driver එකම කොන්දේසි (print head reach) handle කරන නිසා - CSS
+            margin එකක් extra දැම්මොත් කඩදාසි waste වැඩි වෙනවා විතරයි. */}
+        <style>{`@page { size: 80mm auto; margin: 0; }`}</style>
         <div className="text-center font-bold text-sm">--- SmartStore ---</div>
         <div className="text-center text-[9px] text-gray-700">No. 123/A, Kandy Road, Kadawatha</div>
         <div className="text-center text-[9px] text-gray-700">071-2683025 / 078-1533835</div>
