@@ -57,6 +57,28 @@ const PRODUCT_CATEGORIES = [
 // 🛠️ NEW: Unit symbols - centralized (Unit නොමැති/Empty items සඳහාත් "" handle කරයි)
 const UNIT_SYMBOLS = { Kg: "kg", G: "g", Pieces: "Pieces", Packet: "Packet", Bottle: "Bottle", "": "" };
 
+// 🆕 AUTO-SAVE DRAFT BILL: cashier බිලක් හදන අතරතුර page එක refresh වුනොත් / browser crash වුනොත් /
+// power cut එකක් වුනොත් cart එක නැති වෙන්නේ නෑ. Cart + Customer + Payment Method + Bill Discount +
+// ගෙවූ/ලැබුණු මුදල localStorage එකේ auto-save වෙලා, page load වෙද්දී ආපහු restore වෙනවා.
+// 🔐 Draft එක ඒ cashier ට පමණක් බැඳිලා තියෙනවා (වෙන කෙනෙක් login වුනොත් restore වෙන්නේ නෑ), සහ
+// පැය 12කට වඩා පරණ draft එකක් restore වෙන්නේ නෑ.
+const BILL_DRAFT_KEY = "pos_draft_bill";
+const BILL_DRAFT_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const readBillDraft = () => {
+  try {
+    const raw = localStorage.getItem(BILL_DRAFT_KEY);
+    if (!raw) return null;
+    const draft = JSON.parse(raw);
+    const currentUser = JSON.parse(localStorage.getItem("pos_user") || "null");
+    const fresh = draft?.savedAt && Date.now() - draft.savedAt <= BILL_DRAFT_MAX_AGE_MS;
+    if (!draft || !Array.isArray(draft.cart) || draft.cart.length === 0 || !fresh || !currentUser || draft.cashier !== currentUser.username) {
+      localStorage.removeItem(BILL_DRAFT_KEY);
+      return null;
+    }
+    return draft;
+  } catch { return null; }
+};
+
 // 🛠️ NEW: JavaScript Floating-Point Precision Errors (0.1 + 0.2 = 0.30000000000000004 වගේ) නිවැරදි කිරීමට
 // දශම ස්ථාන 3කට Round කරයි (Grams level accuracy - 1g දක්වා නිවැරදියි, ඊට වඩා අනවශ්‍ය decimal noise ඉවත් කරයි)
 const roundQty = (num) => Math.round((parseFloat(num) || 0) * 1000) / 1000;
@@ -165,7 +187,7 @@ function App() {
     }
   });
   const [products, setProducts] = useState([]);
-  const [cart, setCart] = useState([]);
+  const [cart, setCart] = useState(() => readBillDraft()?.cart || []);
   const [loading, setLoading] = useState(true);
 
   // 🆕 HOLD BILL (Park Sale): cashier කෙනෙක්ට cart එකක් Hold කරලා, අලුත් cart එකක් ආරම්භ කරන්න
@@ -250,23 +272,23 @@ function App() {
   const [billingCategoryFilter, setBillingCategoryFilter] = useState("All"); // 🛠️ NEW: Billing screen category filter
 
   // Cash & Payment States
-  const [cashReceived, setCashReceived] = useState("");
+  const [cashReceived, setCashReceived] = useState(() => readBillDraft()?.cashReceived ?? "");
   const [balanceAmount, setBalanceAmount] = useState(0);
-  const [amountPaid, setAmountPaid] = useState(""); 
+  const [amountPaid, setAmountPaid] = useState(() => readBillDraft()?.amountPaid ?? ""); 
 
   // Customer & Credit Book States
   const [customers, setCustomers] = useState([]);
 
   // 🆕 BILL-LEVEL DISCOUNT: Special Occasion Promotions (Loyalty feature intentionally omitted)
   const [promotions, setPromotions] = useState([]);
-  const [appliedBillDiscount, setAppliedBillDiscount] = useState(null); // { name, percent }
+  const [appliedBillDiscount, setAppliedBillDiscount] = useState(() => readBillDraft()?.appliedBillDiscount ?? null); // { name, percent }
   const [promotionForm, setPromotionForm] = useState({ name: "", discountPercent: "" });
 
   // 🆕 ADMIN: Cashier/Staff Account Management (POST /api/users/register, admin-only)
   const [staffUsers, setStaffUsers] = useState([]); // 🆕 admin can see which accounts exist (username + role only, never password)
   const [newUserForm, setNewUserForm] = useState({ username: "", password: "", role: "cashier" });
   const [isCreatingUser, setIsCreatingUser] = useState(false);
-  const [selectedCustomer, setSelectedCustomer] = useState(null);
+  const [selectedCustomer, setSelectedCustomer] = useState(() => readBillDraft()?.selectedCustomer ?? null);
   const [searchPhone, setSearchPhone] = useState(""); // Holds Name or Phone query
   const [customerForm, setCustomerForm] = useState({ name: "", phone: "" });
   const [isEditingCustomer, setIsEditingCustomer] = useState(false);
@@ -304,7 +326,7 @@ function App() {
   const [highlightedCustomerIndex, setHighlightedCustomerIndex] = useState(-1);
 
   // Payment Method State
-  const [paymentMethod, setPaymentMethod] = useState("Cash");
+  const [paymentMethod, setPaymentMethod] = useState(() => readBillDraft()?.paymentMethod || "Cash");
 
   // Sales Summary State
   const [salesSummary, setSalesSummary] = useState({
@@ -479,6 +501,50 @@ function App() {
     return () => clearInterval(interval);
   }, [user, activeTab, adminSubTab]);
 
+  // 🆕 AUTO-SAVE DRAFT BILL: cart/customer/payment state වෙනස් වෙන හැම වෙලාවකම localStorage එකට save කරයි.
+  // Cart එක හිස් නම් (බිල complete වුනා / Clear කලා / Hold කලා) draft එක මකනවා.
+  useEffect(() => {
+    if (!user) return;
+    try {
+      if (cart.length === 0) {
+        localStorage.removeItem(BILL_DRAFT_KEY);
+      } else {
+        localStorage.setItem(BILL_DRAFT_KEY, JSON.stringify({
+          savedAt: Date.now(),
+          cashier: user.username,
+          cart, selectedCustomer, paymentMethod, cashReceived, amountPaid, appliedBillDiscount,
+        }));
+      }
+    } catch {}
+  }, [user, cart, selectedCustomer, paymentMethod, cashReceived, amountPaid, appliedBillDiscount]);
+
+  // 🆕 RESTORE VALIDATION: Draft එකෙන් restore වුන cart එක, products list එක load වුනාම එක පාරක් විතරක්
+  // දැන් තියෙන තත්වයට සාපේක්ෂව පරීක්ෂා කරයි - මකා දැමූ භාණ්ඩ ඉවත් කරයි, තොගයට වඩා වැඩි ප්‍රමාණ
+  // තොගයටම අඩු කරයි. (මිල/වට්ටම් වෙනස් වෙලා නම් checkout වෙද්දී server එකෙන්ම reject කරලා refresh කරන්න කියයි.)
+  const draftRestoreCheckedRef = useRef(false);
+  const readBillDraftMarker = useRef(cart.length > 0); // මේ session එක පටන් ගද්දීම cart එකේ items තිබුනේ (Draft restore වුනාද)
+  useEffect(() => {
+    if (draftRestoreCheckedRef.current || products.length === 0 || cart.length === 0) return;
+    draftRestoreCheckedRef.current = true;
+    if (!readBillDraftMarker.current) return;
+    let removed = 0;
+    let reduced = 0;
+    const checked = [];
+    for (const item of cart) {
+      if (item.isTemporary) { checked.push(item); continue; }
+      if (!products.some((p) => p._id === item._id)) { removed++; continue; }
+      const available = getAvailableStock(item);
+      if (available <= 0) { removed++; continue; }
+      if (parseFloat(item.qty) > available) { reduced++; checked.push({ ...item, qty: available }); continue; }
+      checked.push(item);
+    }
+    if (removed > 0 || reduced > 0) setCart(checked);
+    showToast(
+      `🔄 කලින් බිල restore කලා!${removed > 0 ? ` (භාණ්ඩ ${removed}ක් තොගයේ නැති නිසා ඉවත් කලා)` : ""}${reduced > 0 ? ` (ප්‍රමාණ ${reduced}ක් තොගයට අඩු කලා)` : ""}`,
+      removed > 0 || reduced > 0 ? "warning" : "success"
+    );
+  }, [products]);
+
   // 🆕 GRN History tab එක open කරාම (හෝ Filter එකක් වෙනස් කරාම) ලැයිස්තුව load කරයි
   useEffect(() => {
     if (!(user?.role === "admin" && activeTab === "admin" && adminSubTab === "grnHistory")) return;
@@ -575,7 +641,7 @@ useEffect(() => {
 
   useEffect(() => {
     const handleOnline = async () => {
-      showToast("🔄 Internet Restored! Data syncing...", "warning");
+      showToast("🔄 අන්තර්ජාලය නැවත ලැබුණි! දත්ත සමගාමී (Sync) කරයි...", "warning");
       
       // Pending බිල්පත් ලැයිස්තුව ලබා ගනී
       const pendingSales = await db.offlineSales.where('status').equals('pending').toArray();
