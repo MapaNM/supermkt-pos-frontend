@@ -496,6 +496,20 @@ function DashboardView({ data, days, onChangeDays, isLoading, onRefresh, lastUpd
   );
 }
 
+// Edit / Delete icon buttons for table rows (same line, centred). stopPropagation so a row click handler is not triggered.
+function RowActionIcons({ name, onEdit, onDelete }) {
+  return (
+    <div className="flex items-center justify-center gap-1.5">
+      <button type="button" onClick={(e) => { e.stopPropagation(); onEdit(); }} title="Edit" aria-label={`Edit ${name}`} className="w-6 h-6 grid place-items-center rounded-lg bg-amber-500 hover:bg-amber-600 text-white transition-colors">
+        <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+      </button>
+      <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete" aria-label={`Delete ${name}`} className="w-6 h-6 grid place-items-center rounded-lg bg-red-600 hover:bg-red-700 text-white transition-colors">
+        <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /></svg>
+      </button>
+    </div>
+  );
+}
+
 function App() {
   // 🛠️ FIX: page refresh always dropped you back on Billing regardless of what
   // screen you were on. Now the last tab survives a refresh (sessionStorage —
@@ -655,7 +669,7 @@ function App() {
   // Ordered vs Received (Discrepancy), Expiry Date, Supplier Invoice Reference
   const [grnSupplierId, setGrnSupplierId] = useState("");
   const [grnSupplierInvoiceRef, setGrnSupplierInvoiceRef] = useState(""); // 🆕 The supplier's Invoice/Delivery Note number
-  const [grnCurrentItem, setGrnCurrentItem] = useState({ productId: "", orderedQty: "", quantity: "", costPrice: "", expiryDate: "", stockMode: "add" });
+  const [grnCurrentItem, setGrnCurrentItem] = useState({ productId: "", orderedQty: "", quantity: "", costPrice: "", expiryDate: "", stockMode: "add", sellingPrice: "" });
   const [grnItems, setGrnItems] = useState([]); // [{ productId, productName, unit, orderedQty, quantity, costPrice, expiryDate }]
   const [grnDescription, setGrnDescription] = useState("");
   const [isSubmittingGrn, setIsSubmittingGrn] = useState(false); // 🆕 To prevent double-submit
@@ -1300,6 +1314,13 @@ useEffect(() => {
     } catch (error) { showToast("Operation failed!", "error"); }
   };
 
+  // Leave edit mode and clear the form (Cancel button)
+  const handleCancelCustomerEdit = () => {
+    setIsEditingCustomer(false);
+    setEditCustomerId(null);
+    setCustomerForm({ name: "", phone: "" });
+  };
+
   const handleEditCustomerClick = (customer) => {
     setIsEditingCustomer(true);
     setEditCustomerId(customer._id);
@@ -1444,12 +1465,13 @@ useEffect(() => {
       costPrice: parseFloat(grnCurrentItem.costPrice),
       expiryDate: grnCurrentItem.expiryDate || "",
       stockMode: grnCurrentItem.stockMode || "add",
+      sellingPrice: parseFloat(grnCurrentItem.sellingPrice) > 0 ? parseFloat(grnCurrentItem.sellingPrice) : null, // optional new selling price
       // 🆕 For UI - if an Ordered Qty was noted and it differs from the Received Qty, highlight it
       hasDiscrepancy: orderedQty > 0 && orderedQty !== receivedQty,
     }]);
 
     // Resets the row, type the next item
-    setGrnCurrentItem({ productId: "", orderedQty: "", quantity: "", costPrice: "", expiryDate: "", stockMode: "add" });
+    setGrnCurrentItem({ productId: "", orderedQty: "", quantity: "", costPrice: "", expiryDate: "", stockMode: "add", sellingPrice: "" });
   };
 
   // 🛠️ NEW: Remove an item from the GRN List
@@ -1472,6 +1494,7 @@ useEffect(() => {
           costPrice: item.costPrice,
           expiryDate: item.expiryDate || null,
           stockMode: item.stockMode,
+          sellingPrice: item.sellingPrice ?? null,
         })),
         description: grnDescription,
         supplierInvoiceRef: grnSupplierInvoiceRef,
@@ -1481,7 +1504,7 @@ useEffect(() => {
       setGrnSupplierId("");
       setGrnSupplierInvoiceRef("");
       setGrnItems([]);
-      setGrnCurrentItem({ productId: "", orderedQty: "", quantity: "", costPrice: "", expiryDate: "", stockMode: "add" });
+      setGrnCurrentItem({ productId: "", orderedQty: "", quantity: "", costPrice: "", expiryDate: "", stockMode: "add", sellingPrice: "" });
       setGrnDescription("");
       fetchSuppliers();
       fetchProducts(); // 🛠️ Refreshes the Products list since Stock and Cost Price have changed
@@ -1634,13 +1657,19 @@ useEffect(() => {
   };
 
   const addToCart = (product, selectedBatch = null) => {
-    // 🆕 EXPIRY CHECK: Does not allow selling an expired item
-    const expiryStatus = getExpiryStatus(product);
-    if (expiryStatus === "expired") {
-      return showToast(`🚫 "${product.name}" has expired! (${new Date(product.expiryDate).toLocaleDateString()}) - This cannot be sold.`, "error");
-    }
-    if (expiryStatus === "expiring") {
-      showToast(`⚠️ "${product.name}" expires soon (${new Date(product.expiryDate).toLocaleDateString()})! Sell with caution.`, "warning");
+    // 🆕 EXPIRY CHECK: Does not allow selling an expired item - checked against the batch actually being sold.
+    // (When the price-choice popup is about to open, the check runs when the cashier picks a batch.)
+    const liveBatches = getActivePriceBatches(product);
+    if (selectedBatch || liveBatches.length <= 1) {
+      const batchToSell = selectedBatch || (liveBatches.length === 1 ? liveBatches[0] : null);
+      const expiryStatus = getExpiryStatus(product, batchToSell);
+      const expDate = batchToSell?.expiryDate || product.expiryDate;
+      if (expiryStatus === "expired") {
+        return showToast(`🚫 "${product.name}" has expired! (${new Date(expDate).toLocaleDateString()}) - This cannot be sold.`, "error");
+      }
+      if (expiryStatus === "expiring") {
+        showToast(`⚠️ "${product.name}" expires soon (${new Date(expDate).toLocaleDateString()})! Sell with caution.`, "warning");
+      }
     }
 
     // 🆕 MULTI-PRICE CHECK: If no Batch has been selected yet, and the Product has more than 1 Active Batch - show the Popup
@@ -2595,6 +2624,10 @@ useEffect(() => {
     if (newPriceEntry.qty === "" || parseFloat(newPriceEntry.qty) <= 0) {
       return showToast("Enter the newly received quantity!", "warning");
     }
+    // A blank cost silently became Rs.0 (or fell back to the OLD cost), which makes profit reports wrong - so it is required.
+    if (!newPriceEntry.costPrice || parseFloat(newPriceEntry.costPrice) <= 0) {
+      return showToast("Enter the cost price of this new stock (needed for correct profit)!", "warning");
+    }
 
     let existingBatches = productForm.batches || [];
 
@@ -2942,13 +2975,31 @@ useEffect(() => {
   };
 
   // 🆕 EXPIRY HELPERS
-  const getExpiryStatus = (product) => {
-    if (!product.expiryDate) return null;
+  // Status of a single date (null = no date)
+  const expiryDateStatus = (dateValue) => {
+    if (!dateValue) return null;
     const today = new Date(); today.setHours(0, 0, 0, 0);
-    const expiry = new Date(product.expiryDate); expiry.setHours(0, 0, 0, 0);
+    const expiry = new Date(dateValue); expiry.setHours(0, 0, 0, 0);
     const diffDays = Math.ceil((expiry - today) / (1000 * 60 * 60 * 24));
     if (diffDays < 0) return "expired";
     if (diffDays <= 7) return "expiring";
+    return "ok";
+  };
+
+  // 🐛 FIX: expiry is stored per batch (GRN). Before, only product.expiryDate was read, so (1) a fresh batch was blocked by an old
+  // product-level date and (2) a near-expiry batch never raised a warning.
+  //   - with `batch`: that batch's own date (legacy fallback: the product-level date when no batch of the product has a date)
+  //   - without `batch` (tiles/lists): "expired" only if EVERY in-stock batch is expired (nothing sellable left);
+  //     "expiring" if any in-stock batch is expired or close to expiry.
+  const getExpiryStatus = (product, batch = null) => {
+    const batches = Array.isArray(product.batches) ? product.batches : [];
+    const anyBatchDate = batches.some((b) => b.expiryDate);
+    if (batch) return expiryDateStatus(batch.expiryDate || (anyBatchDate ? null : product.expiryDate));
+    if (!anyBatchDate) return expiryDateStatus(product.expiryDate);
+    const live = batches.filter((b) => (parseFloat(b.stock) || 0) > 0);
+    const statuses = (live.length > 0 ? live : batches).map((b) => expiryDateStatus(b.expiryDate));
+    if (statuses.every((st) => st === "expired")) return "expired";
+    if (statuses.some((st) => st === "expired" || st === "expiring")) return "expiring";
     return "ok";
   };
 
@@ -3465,6 +3516,8 @@ useEffect(() => {
                       <div>
                         <div className="text-[11px] font-700 text-faint">
                           {getBatchDisplayLabel(batch, index, activeBatches.length) || `Option ${String.fromCharCode(65 + index)}`}
+                          {getExpiryStatus(multiPricePopup, batch) === "expired" && <span className="ml-1.5 text-[10px] font-700 text-crimson bg-crimson-soft px-1.5 py-px rounded">⛔ Expired</span>}
+                          {getExpiryStatus(multiPricePopup, batch) === "expiring" && <span className="ml-1.5 text-[10px] font-700 text-gold bg-gold-soft px-1.5 py-px rounded">⚠️ Expiring soon</span>}
                         </div>
                         <div className="flex items-baseline gap-1.5">
                           <span className="tnum text-[19px] font-800 text-accent">Rs. {parseFloat(batch.price).toFixed(2)}</span>
@@ -4727,9 +4780,15 @@ useEffect(() => {
                                   </span>
                                 ) : <span className="text-gray-300 text-[10px]">-</span>}
                               </td>
-                              <td className="p-3 text-center space-x-1.5">
-                                <button onClick={() => handleEditClick(p)} className="bg-amber-500 hover:bg-amber-600 text-white px-2 py-1 m-1 rounded text-[10px] font-bold">Edit</button>
-                                <button onClick={() => handleDeleteClick(p._id)} className="bg-red-600 hover:bg-red-700 text-white px-2 py-1 rounded text-[10px] font-bold">Delete</button>
+                              <td className="p-3">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button type="button" onClick={() => handleEditClick(p)} title="Edit" aria-label={`Edit ${p.name}`} className="w-6 h-6 grid place-items-center rounded-lg bg-amber-500 hover:bg-amber-600 text-white transition-colors">
+                                    <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                                  </button>
+                                  <button type="button" onClick={() => handleDeleteClick(p._id)} title="Delete" aria-label={`Delete ${p.name}`} className="w-6 h-6 grid place-items-center rounded-lg bg-red-600 hover:bg-red-700 text-white transition-colors">
+                                    <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /></svg>
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           );})}
@@ -4968,7 +5027,12 @@ useEffect(() => {
                             <p className="text-[10px] text-red-600 font-bold mt-1">Invalid phone number (e.g. 0771234567)</p>
                           )}
                         </div>
-                        <button type="submit" className="w-full bg-blue-600 text-white py-2 rounded text-xs font-bold shadow-md">{isEditingCustomer ? "Update" : "Create Account"}</button>
+                        <div className="flex gap-2">
+                          <button type="submit" className="flex-1 bg-blue-600 text-white py-2 rounded text-xs font-bold shadow-md">{isEditingCustomer ? "Update" : "Create Account"}</button>
+                          {isEditingCustomer && (
+                            <button type="button" onClick={handleCancelCustomerEdit} className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-600 py-2 rounded text-xs font-bold border border-gray-200">Cancel</button>
+                          )}
+                        </div>
                       </form>
 
                       {/* Manual Settle Credit Payment Section */}
@@ -5030,10 +5094,7 @@ useEffect(() => {
                                 <td className="p-3 font-bold text-slate-900 hover:text-blue-600 hover:underline">{c.name}</td>
                                 <td className="p-3 text-gray-500">{c.phone}</td>
                                 <td className="p-3 text-right font-black text-red-600">Rs. {c.creditBalance?.toFixed(2) || "0.00"}</td>
-                                <td className="p-3 text-center space-x-1.5">
-                                  <button onClick={(e) => { e.stopPropagation(); handleEditCustomerClick(c); }} className="bg-amber-500 text-white px-2 py-1 rounded text-[10px] font-bold">Edit</button>
-                                  <button onClick={(e) => { e.stopPropagation(); handleDeleteCustomerClick(c._id); }} className="bg-red-600 text-white px-2 py-1 rounded text-[10px] font-bold">Delete</button>
-                                </td>
+                                <td className="p-3"><RowActionIcons name={c.name} onEdit={() => handleEditCustomerClick(c)} onDelete={() => handleDeleteCustomerClick(c._id)} /></td>
                               </tr>
                             ))}
                         </tbody>
@@ -5145,8 +5206,9 @@ useEffect(() => {
                             <input type="text" value={supplierForm.address} onChange={(e) => setSupplierForm({ ...supplierForm, address: e.target.value })} className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white" />
                           </div>
                           <div className="flex gap-2">
-                            {isEditingSupplier && <button type="button" onClick={() => { setIsEditingSupplier(false); setEditSupplierId(null); setSupplierForm({ name: "", phone: "", address: "" }); }} className="flex-1 bg-gray-500 text-white py-2 rounded text-xs font-bold">Cancel</button>}
                             <button type="submit" className="flex-1 bg-blue-600 text-white py-2 rounded text-xs font-bold shadow-md">{isEditingSupplier ? "Update" : "Create Account"}</button>
+                            {isEditingSupplier && <button type="button" onClick={() => { setIsEditingSupplier(false); setEditSupplierId(null); setSupplierForm({ name: "", phone: "", address: "" }); }} className="flex-1 bg-gray-500 text-white py-2 rounded text-xs font-bold">Cancel</button>}
+                            
                           </div>
                         </form>
                       </div>
@@ -5222,6 +5284,48 @@ useEffect(() => {
                               </div>
                             </div>
 
+                            {/* 🆕 NEW SELLING PRICE (optional) - when the purchase cost goes up, reprice the new stock so the margin is protected */}
+                            {(() => {
+                              const sp = products.find((p) => p._id === grnCurrentItem.productId);
+                              if (!sp) return null;
+                              const curPrice = parseFloat(sp.price) || 0;
+                              const curCost = parseFloat(sp.costPrice) || 0;
+                              const newCost = parseFloat(grnCurrentItem.costPrice) || 0;
+                              const typedSell = parseFloat(grnCurrentItem.sellingPrice) || 0;
+                              const effSell = typedSell > 0 ? typedSell : curPrice;
+                              const marginOf = (price, cost) => (price > 0 ? ((price - cost) / price) * 100 : 0);
+                              const oldMargin = marginOf(curPrice, curCost);
+                              const newMargin = marginOf(effSell, newCost);
+                              const costChanged = newCost > 0 && Math.abs(newCost - curCost) > 0.001;
+                              // Selling price that keeps the previous margin % at the new cost (rounded up to a whole rupee)
+                              const suggested = curCost > 0 && curPrice > curCost && newCost > 0 ? Math.ceil(newCost / (1 - oldMargin / 100)) : null;
+                              return (
+                                <div className="rounded-lg border border-amber-200 bg-white p-2.5 space-y-1.5">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <label className="text-[10px] font-bold text-gray-500">New selling price for this stock (Rs., optional):</label>
+                                    <span className="text-[10px] text-gray-400">Current: Rs.{curPrice.toFixed(2)} • Cost: Rs.{curCost.toFixed(2)}</span>
+                                  </div>
+                                  <div className="flex gap-2">
+                                    <input type="number" step="0.01" min="0" placeholder={`Blank = keep Rs.${curPrice.toFixed(2)}`} value={grnCurrentItem.sellingPrice} onChange={(e) => setGrnCurrentItem({ ...grnCurrentItem, sellingPrice: e.target.value })} className="flex-1 min-w-0 p-2 border rounded text-xs font-black text-emerald-700 bg-white" />
+                                    {suggested && suggested !== curPrice && (
+                                      <button type="button" onClick={() => setGrnCurrentItem({ ...grnCurrentItem, sellingPrice: String(suggested) })} className="shrink-0 px-2.5 rounded border border-emerald-300 bg-emerald-50 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100" title="Keeps the previous margin % at the new cost">
+                                        Keep margin → Rs.{suggested}
+                                      </button>
+                                    )}
+                                  </div>
+                                  {newCost > 0 && effSell > 0 && newCost >= effSell && (
+                                    <p className="text-[10px] font-bold text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1">⛔ The selling price (Rs.{effSell.toFixed(2)}) is not above the cost (Rs.{newCost.toFixed(2)}) - this stock would sell at a loss.</p>
+                                  )}
+                                  {costChanged && typedSell <= 0 && newCost < effSell && newMargin < oldMargin - 0.05 && (
+                                    <p className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">⚠️ Cost changed (Rs.{curCost.toFixed(2)} → Rs.{newCost.toFixed(2)}). At the current price the margin drops from {oldMargin.toFixed(1)}% to {newMargin.toFixed(1)}%. Enter a new selling price to protect it.</p>
+                                  )}
+                                  {typedSell > 0 && newCost > 0 && newCost < typedSell && (
+                                    <p className="text-[10px] text-slate-500">New margin: <b className="text-emerald-700">{newMargin.toFixed(1)}%</b> (previous {oldMargin.toFixed(1)}%). Older stock keeps selling at Rs.{curPrice.toFixed(2)}; the cashier picks the price in the Billing popup.</p>
+                                  )}
+                                </div>
+                              );
+                            })()}
+
                             {/* 🛠️ Stock Mode Toggle - Add (creates a new Batch) vs Set (set as / Overwrite) */}
                             <div>
                               <label className="text-[10px] font-bold text-gray-500 block mb-1">Action on current stock:</label>
@@ -5278,6 +5382,7 @@ useEffect(() => {
                                         {item.orderedQty > 0 ? `${formatQtyWithUnit(item.orderedQty, item.unit)} Ordered → ` : ""}
                                         {formatQtyWithUnit(item.quantity, item.unit)} Received × Rs.{item.costPrice.toFixed(2)}
                                         {item.expiryDate ? ` • Exp: ${item.expiryDate}` : ""}
+                                        {item.sellingPrice ? ` • New selling price: Rs.${item.sellingPrice.toFixed(2)}` : ""}
                                       </p>
                                     </div>
                                     <div className="flex items-center gap-2">
@@ -5367,10 +5472,7 @@ useEffect(() => {
                               <td className="p-3 text-gray-500">{s.phone}</td>
                               <td className="p-3 text-gray-500">{s.address || "-"}</td>
                               <td className="p-3 text-right font-black text-red-600">Rs. {s.balanceDue?.toFixed(2) || "0.00"}</td>
-                              <td className="p-3 text-center space-x-1.5">
-                                <button onClick={(e) => { e.stopPropagation(); handleEditSupplierClick(s); }} className="bg-amber-500 text-white px-2 py-1 rounded text-[10px] font-bold">Edit</button>
-                                <button onClick={(e) => { e.stopPropagation(); handleDeleteSupplierClick(s._id); }} className="bg-red-600 text-white px-2 py-1 rounded text-[10px] font-bold">Delete</button>
-                              </td>
+                              <td className="p-3"><RowActionIcons name={s.name} onEdit={() => handleEditSupplierClick(s)} onDelete={() => handleDeleteSupplierClick(s._id)} /></td>
                             </tr>
                           ))}
                         </tbody>
