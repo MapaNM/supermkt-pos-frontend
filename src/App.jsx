@@ -651,7 +651,16 @@ function App() {
 
   // 🆕 ADMIN: Cashier/Staff Account Management (POST /api/users/register, admin-only)
   const [staffUsers, setStaffUsers] = useState([]); // 🆕 admin can see which accounts exist (username + role only, never password)
-  const [newUserForm, setNewUserForm] = useState({ username: "", password: "", role: "cashier" });
+  const [newUserForm, setNewUserForm] = useState({ username: "", password: "", role: "cashier", preset: "cashier" });
+  // 🔐 Permission editor + audit log (admin only)
+  const [permCatalog, setPermCatalog] = useState(null); // { permissions: [...], presets: {...} } from GET /users/permissions/catalog
+  const [permEditId, setPermEditId] = useState(null);
+  const [permForm, setPermForm] = useState(null); // { preset, permissions[], maxReturnAmount, active }
+  const [isSavingPerm, setIsSavingPerm] = useState(false);
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [auditNext, setAuditNext] = useState(null);
+  const [auditFilter, setAuditFilter] = useState({ category: "", severity: "", q: "" });
+  const [isLoadingAudit, setIsLoadingAudit] = useState(false);
   const [isCreatingUser, setIsCreatingUser] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState(() => readBillDraft()?.selectedCustomer ?? null);
   const [searchPhone, setSearchPhone] = useState(""); // Holds Name or Phone query
@@ -717,6 +726,25 @@ function App() {
   // browser), so we filter by owner here. Admin sees everything (supervision); legacy bills with no
   // owner are visible to Admin only.
   const myHeldBills = heldBills.filter((h) => user?.role === "admin" || (h.cashier && h.cashier === user?.username));
+  // 🔐 PERMISSIONS: the server enforces everything; these helpers only decide what to SHOW. Admin can do everything.
+  // A legacy session saved before permissions existed falls back to the plain Cashier preset.
+  const can = (key) => user?.role === "admin" || (user?.permissions || ["process_return", "collect_credit_payment"]).includes(key);
+  const canTab = (tab) => {
+    switch (tab) {
+      case "products": return can("manage_products");
+      case "customers": return can("manage_customers");
+      case "promotions": return can("manage_promotions");
+      case "suppliers": return can("manage_suppliers") || can("receive_stock") || can("pay_supplier");
+      case "grnHistory": return can("receive_stock");
+      case "shiftHistory": case "outsideShift": return can("view_shift_history");
+      case "reorder": case "expiry": return can("view_stock_alerts");
+      case "unregistered": case "returns": case "sales": return can("view_reports");
+      case "staff": case "audit": return user?.role === "admin";
+      default: return false;
+    }
+  };
+  const ADMIN_TAB_ORDER = ["products", "customers", "promotions", "suppliers", "grnHistory", "shiftHistory", "outsideShift", "reorder", "expiry", "unregistered", "returns", "sales", "staff", "audit"];
+  const canAdminPanel = ADMIN_TAB_ORDER.some(canTab);
   const [loginForm, setLoginForm] = useState({ username: "", password: "" });
   const [loginError, setLoginError] = useState("");
 
@@ -828,13 +856,10 @@ function App() {
       fetchProducts();
       fetchCustomers();
       fetchPromotions(); // 🆕 Needed by both Cashier and Admin - to show the Live discount option on the Billing Screen
-      if (user.role === "admin") {
-        fetchSalesSummary();
-        fetchSuppliers();
-        fetchReturnHistory();
-        fetchStaffUsers(); // 🆕 Cashier/Staff Account list
-      }
-      fetchExpiringProducts();
+      if (can("view_reports")) { fetchSalesSummary(); fetchReturnHistory(); }
+      if (canTab("suppliers")) fetchSuppliers();
+      if (user.role === "admin") fetchStaffUsers(); // 🆕 Cashier/Staff Account list
+      fetchExpiringProducts(); // (skips itself when the user has no alert permission)
       fetchCurrentShift(); // 🆕 On Login/Page refresh, checks whether there is currently an Open Shift
     }
   }, [user]);
@@ -844,9 +869,9 @@ function App() {
   // from a previous session on a shared till). Billing AND Returns are both fine
   // for a cashier — only "admin" is off-limits to them.
   useEffect(() => {
-    if (user?.role === "cashier" && activeTab !== "billing" && activeTab !== "returns") {
-      setActiveTab("billing");
-      return;
+    if (user && user.role !== "admin") {
+      const allowed = activeTab === "billing" || (activeTab === "returns" && can("process_return")) || (activeTab === "dashboard" && can("view_dashboard")) || (activeTab === "admin" && canAdminPanel);
+      if (!allowed) { setActiveTab("billing"); return; }
     }
     try { sessionStorage.setItem("pos_activeTab", activeTab); } catch {}
   }, [activeTab, user]);
@@ -858,6 +883,38 @@ function App() {
     try { sessionStorage.setItem("pos_adminSubTab", adminSubTab); } catch {}
   }, [adminSubTab]);
 
+  // 🔐 If the open Admin sub-tab is not allowed for this user (or was revoked), jump to the first one that is.
+  useEffect(() => {
+    if (!user || activeTab !== "admin" || canTab(adminSubTab)) return;
+    const first = ADMIN_TAB_ORDER.find(canTab);
+    if (first) setAdminSubTab(first);
+  }, [user, activeTab, adminSubTab]);
+
+  // 🔐 Refresh my own permissions from the server every 45s (and when the window regains focus) so a change by the admin -
+  // or a disabled account - is picked up without logging out. Only updates state when something really changed.
+  useEffect(() => {
+    if (!user) return;
+    const refreshMe = async () => {
+      try {
+        const res = await axios.get(`${API_BASE_URL}/users/me`);
+        const fresh = res.data?.user;
+        if (!fresh) return;
+        setUser((prev) => {
+          if (!prev) return prev;
+          const same = JSON.stringify([prev.role, prev.permissions, prev.limits, prev.preset]) === JSON.stringify([fresh.role, fresh.permissions, fresh.limits, fresh.preset]);
+          if (same) return prev;
+          const next = { ...prev, ...fresh };
+          try { localStorage.setItem("pos_user", JSON.stringify(next)); } catch {}
+          return next;
+        });
+      } catch {}
+    };
+    refreshMe();
+    const iv = setInterval(refreshMe, 45000);
+    window.addEventListener("focus", refreshMe);
+    return () => { clearInterval(iv); window.removeEventListener("focus", refreshMe); };
+  }, [user?.username]);
+
   // 🆕 LIVE SALES LOG: fetchSalesSummary() only ever ran when THIS session did the
   // checkout/void/return — so a sale from another till, or another browser tab,
   // never showed up here until a manual page refresh. Polling every 5s while this
@@ -866,7 +923,7 @@ function App() {
   useEffect(() => {
     // 🆕 The "dashboard" tab has also been added to this - the Daily Sales Graph/Cashier Performance table should
     // also update live; previously it was limited to just the "sales" log tab.
-    if (!(user?.role === "admin" && activeTab === "admin" && adminSubTab === "sales")) return;
+    if (!(can("view_reports") && activeTab === "admin" && adminSubTab === "sales")) return;
     const interval = setInterval(() => { fetchSalesSummary(); }, 5000);
     return () => clearInterval(interval);
   }, [user, activeTab, adminSubTab]);
@@ -888,7 +945,7 @@ function App() {
   };
 
   useEffect(() => {
-    if (!(user?.role === "admin" && activeTab === "dashboard")) return;
+    if (!(can("view_dashboard") && activeTab === "dashboard")) return;
     fetchDashboard();
     fetchExpiringProducts();
     const interval = setInterval(() => { fetchDashboard(); }, 30000);
@@ -942,21 +999,21 @@ function App() {
 
   // 🆕 Loads the list when the GRN History tab is opened (or a Filter is changed)
   useEffect(() => {
-    if (!(user?.role === "admin" && activeTab === "admin" && adminSubTab === "grnHistory")) return;
+    if (!(can("receive_stock") && activeTab === "admin" && adminSubTab === "grnHistory")) return;
     fetchGrnHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, activeTab, adminSubTab]);
 
   // 🆕 Loads the report when the "Transactions without a Shift" tab is opened
   useEffect(() => {
-    if (!(user?.role === "admin" && activeTab === "admin" && adminSubTab === "outsideShift")) return;
+    if (!(can("view_shift_history") && activeTab === "admin" && adminSubTab === "outsideShift")) return;
     fetchOutsideActivity();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, activeTab, adminSubTab]);
 
   // 🆕 Loads the list when the Shift History tab is opened
   useEffect(() => {
-    if (!(user?.role === "admin" && activeTab === "admin" && adminSubTab === "shiftHistory")) return;
+    if (!(can("view_shift_history") && activeTab === "admin" && adminSubTab === "shiftHistory")) return;
     fetchShiftHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, activeTab, adminSubTab]);
@@ -1073,7 +1130,7 @@ useEffect(() => {
       }
       showToast("✅ All Offline bills were successfully sent to the server! 🎉");
       fetchProducts();
-      if (user.role === "admin") fetchSalesSummary(); // 🛠️ FIX: Unregistered Items/Sales Logs are Refreshed even after Offline sales are synced
+      if (can("view_reports")) fetchSalesSummary(); // 🛠️ FIX: Unregistered Items/Sales Logs are Refreshed even after Offline sales are synced
     };
 
     window.addEventListener('online', handleOnline);
@@ -1174,7 +1231,7 @@ useEffect(() => {
     try {
       const response = await axios.post(`${API_BASE_URL}/users/register`, newUserForm);
       showToast(response.data.message || "Account created successfully! ✅");
-      setNewUserForm({ username: "", password: "", role: "cashier" });
+      setNewUserForm({ username: "", password: "", role: "cashier", preset: "cashier" });
       fetchStaffUsers();
     } catch (error) {
       showToast(error.response?.data?.message || "Failed to create account!", "error");
@@ -1193,6 +1250,82 @@ useEffect(() => {
       showToast(error.response?.data?.message || "Failed to delete!", "error");
     }
   };
+
+  // 🔐 PERMISSION EDITOR
+  const fetchPermCatalog = async () => {
+    try {
+      const res = await axios.get(`${API_BASE_URL}/users/permissions/catalog`);
+      setPermCatalog(res.data);
+    } catch (error) { console.error(error); }
+  };
+
+  const openPermEditor = (u) => {
+    if (permEditId === u._id) { setPermEditId(null); setPermForm(null); return; }
+    setPermEditId(u._id);
+    setPermForm({
+      preset: u.preset || "cashier",
+      permissions: [...(u.effectivePermissions || [])],
+      maxReturnAmount: u.limits?.maxReturnAmount ?? "",
+      active: u.active !== false,
+    });
+    if (!permCatalog) fetchPermCatalog();
+  };
+
+  const applyPermPreset = (presetKey) => {
+    if (presetKey === "custom") return setPermForm((f) => ({ ...f, preset: "custom" }));
+    const list = permCatalog?.presets?.[presetKey]?.permissions || [];
+    setPermForm((f) => ({ ...f, preset: presetKey, permissions: [...list] }));
+  };
+
+  const togglePerm = (key) => {
+    setPermForm((f) => {
+      const has = f.permissions.includes(key);
+      return { ...f, preset: "custom", permissions: has ? f.permissions.filter((k) => k !== key) : [...f.permissions, key] };
+    });
+  };
+
+  const savePermissions = async (u) => {
+    setIsSavingPerm(true);
+    try {
+      const limitVal = permForm.maxReturnAmount === "" ? null : parseFloat(permForm.maxReturnAmount);
+      const res = await axios.put(`${API_BASE_URL}/users/${u._id}/permissions`, {
+        preset: permForm.preset,
+        permissions: permForm.permissions,
+        limits: { maxReturnAmount: limitVal },
+        active: permForm.active,
+      });
+      showToast(res.data.message || "Access updated! ✅");
+      setPermEditId(null); setPermForm(null);
+      fetchStaffUsers();
+    } catch (error) {
+      showToast(error.response?.data?.message || "Failed to update access!", "error");
+    } finally {
+      setIsSavingPerm(false);
+    }
+  };
+
+  // 🧾 AUDIT LOG
+  const fetchAuditLogs = async (reset = true) => {
+    setIsLoadingAudit(true);
+    try {
+      const params = { limit: 50 };
+      if (auditFilter.category) params.category = auditFilter.category;
+      if (auditFilter.severity) params.severity = auditFilter.severity;
+      if (auditFilter.q.trim()) params.q = auditFilter.q.trim();
+      if (!reset && auditNext) params.before = auditNext;
+      const res = await axios.get(`${API_BASE_URL}/audit`, { params });
+      setAuditLogs((prev) => (reset ? res.data.logs : [...prev, ...res.data.logs]));
+      setAuditNext(res.data.nextCursor || null);
+    } catch (error) {
+      showToast(error.response?.data?.message || "Failed to load the audit log!", "error");
+    } finally {
+      setIsLoadingAudit(false);
+    }
+  };
+
+  useEffect(() => {
+    if (user?.role === "admin" && activeTab === "admin" && adminSubTab === "audit") fetchAuditLogs(true);
+  }, [user, activeTab, adminSubTab, auditFilter.category, auditFilter.severity]);
 
   const handlePromotionSubmit = async (e) => {
     e.preventDefault();
@@ -1259,6 +1392,7 @@ useEffect(() => {
 
   // 🆕 Fetching items that are Expiring / have Expired (within the next 7 days)
   const fetchExpiringProducts = async () => {
+    if (!can("view_stock_alerts")) return;
     try {
       const response = await axios.get(`${API_BASE_URL}/products/expiring?days=7`);
       setExpiringProducts(response.data);
@@ -2031,7 +2165,7 @@ useEffect(() => {
       fetchCustomers();
       // 🛠️ FIX: After Checkout, also refreshes the Sales Summary - so things like the Unregistered Items tab, Sales Logs,
       // and Revenue/Profit stats update Instantly without a Page Refresh
-      if (user.role === "admin") fetchSalesSummary();
+      if (can("view_reports")) fetchSalesSummary();
 
     } catch (error) {
       // 📴 OFFLINE: If there is no internet, saves the bill in the browser
@@ -2442,7 +2576,7 @@ useEffect(() => {
       resetReturnUI();
       fetchProducts();
       fetchCustomers();
-      if (user.role === "admin") { fetchSalesSummary(); fetchReturnHistory(); }
+      if (can("view_reports")) { fetchSalesSummary(); fetchReturnHistory(); }
     } catch (error) {
       showToast(error.response?.data?.message || "Return failed!", "error");
     }
@@ -2494,7 +2628,7 @@ useEffect(() => {
       resetReturnUI();
       fetchProducts();
       fetchCustomers();
-      if (user.role === "admin") { fetchSalesSummary(); fetchReturnHistory(); }
+      if (can("view_reports")) { fetchSalesSummary(); fetchReturnHistory(); }
     } catch (error) {
       showToast(error.response?.data?.message || "Exchange failed!", "error");
     }
@@ -2516,7 +2650,7 @@ useEffect(() => {
         sessionStorage.removeItem("pos_session_expired_reload"); // fresh login - re-arm the 401 guard
 
         // 🆕 When an Admin logs in, goes straight to the Dashboard (Billing for a Cashier)
-        setActiveTab(response.data.user.role === "admin" ? "dashboard" : "billing");
+        setActiveTab(response.data.user.role === "admin" || (response.data.user.permissions || []).includes("view_dashboard") ? "dashboard" : "billing");
         setTimeout(() => showToast(`Have a great day ${response.data.user.username}! 👋`), 300);
       }
     } catch (error) { setLoginError(error.response?.data?.message || "Error"); }
@@ -2874,7 +3008,7 @@ useEffect(() => {
       lowStockAlertShownRef.current = false; // reset on logout so it shows again on the next login
       return;
     }
-    if (user.role === "admin" && products.length > 0 && !lowStockAlertShownRef.current) {
+    if (can("view_stock_alerts") && products.length > 0 && !lowStockAlertShownRef.current) {
       lowStockAlertShownRef.current = true;
       if (lowStockProducts.length > 0) {
         showToast(`⚠️ ${lowStockProducts.length} Product(s) are low on stock! Check the Dashboard/Reorder List.`, "warning");
@@ -3858,14 +3992,14 @@ useEffect(() => {
           </div>
 
           <nav className="flex items-center gap-0.5">
-            {user.role === "admin" && (
+            {can("view_dashboard") && (
               <button onClick={() => setActiveTab("dashboard")} className={`h-7 px-3 rounded-md text-[13px] transition-colors ${activeTab === "dashboard" ? "bg-ink3 text-white font-600" : "font-500 text-white/55 hover:text-white hover:bg-white/8"}`}>
                 Dashboard{lowStockProducts.length + expiringProducts.length > 0 && <span className="ml-1.5 inline-block min-w-4 px-1 rounded-full bg-red-500 text-white text-[9px] font-black leading-4 text-center">{lowStockProducts.length + expiringProducts.length}</span>}
               </button>
             )}
             <button onClick={() => setActiveTab("billing")} className={`h-7 px-3 rounded-md text-[13px] transition-colors ${activeTab === "billing" ? "bg-ink3 text-white font-600" : "font-500 text-white/55 hover:text-white hover:bg-white/8"}`}>Billing</button>
-            <button onClick={() => { setActiveTab("returns"); resetReturnUI(); }} className={`h-7 px-3 rounded-md text-[13px] transition-colors ${activeTab === "returns" ? "bg-ink3 text-white font-600" : "font-500 text-white/55 hover:text-white hover:bg-white/8"}`}>Returns</button>
-            {user.role === "admin" && (
+            {can("process_return") && <button onClick={() => { setActiveTab("returns"); resetReturnUI(); }} className={`h-7 px-3 rounded-md text-[13px] transition-colors ${activeTab === "returns" ? "bg-ink3 text-white font-600" : "font-500 text-white/55 hover:text-white hover:bg-white/8"}`}>Returns</button>}
+            {canAdminPanel && (
               <button onClick={() => setActiveTab("admin")} className={`h-7 px-3 rounded-md text-[13px] transition-colors ${activeTab === "admin" ? "bg-ink3 text-white font-600" : "font-500 text-white/55 hover:text-white hover:bg-white/8"}`}>Admin</button>
             )}
           </nav>
@@ -4512,7 +4646,7 @@ useEffect(() => {
           )}
 
           {/* 🆕 SMART DASHBOARD (Main menu) */}
-          {activeTab === "dashboard" && user.role === "admin" && (
+          {activeTab === "dashboard" && can("view_dashboard") && (
             <div className="w-full h-full overflow-y-auto bg-slate-50">
               <DashboardView
                 data={dashboardData}
@@ -4533,38 +4667,39 @@ useEffect(() => {
           )}
 
           {/* Admin Panels */}
-          {activeTab === "admin" && user.role === "admin" && (
+          {activeTab === "admin" && canAdminPanel && (
             <div className="flex w-full h-full bg-slate-50 overflow-hidden">
               {/* Sidebar Tabs for Admin */}
               <div className="w-48 bg-slate-800 text-gray-300 flex flex-col font-medium text-sm">
-                <button onClick={() => setAdminSubTab("products")} className={`p-3 text-left font-bold ${adminSubTab === "products" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📦 Stock Management</button>
-                <button onClick={() => setAdminSubTab("customers")} className={`p-3 text-left font-bold ${adminSubTab === "customers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👥 Customer Records</button>
-                <button onClick={() => setAdminSubTab("promotions")} className={`p-3 text-left font-bold ${adminSubTab === "promotions" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🎉 Special Discounts</button>
-                <button onClick={() => setAdminSubTab("suppliers")} className={`p-3 text-left font-bold ${adminSubTab === "suppliers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚚 Suppliers</button>
-                <button onClick={() => setAdminSubTab("grnHistory")} className={`p-3 text-left font-bold ${adminSubTab === "grnHistory" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📋 GRN History</button>
-                <button onClick={() => setAdminSubTab("shiftHistory")} className={`p-3 text-left font-bold ${adminSubTab === "shiftHistory" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🧾 Shift History</button>
-                <button onClick={() => setAdminSubTab("outsideShift")} className={`p-3 text-left font-bold ${adminSubTab === "outsideShift" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚨 Transactions Outside Shift</button>
-                <button onClick={() => setAdminSubTab("reorder")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "reorder" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
+                {canTab("products") && <button onClick={() => setAdminSubTab("products")} className={`p-3 text-left font-bold ${adminSubTab === "products" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📦 Stock Management</button>}
+                {canTab("customers") && <button onClick={() => setAdminSubTab("customers")} className={`p-3 text-left font-bold ${adminSubTab === "customers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👥 Customer Records</button>}
+                {canTab("promotions") && <button onClick={() => setAdminSubTab("promotions")} className={`p-3 text-left font-bold ${adminSubTab === "promotions" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🎉 Special Discounts</button>}
+                {canTab("suppliers") && <button onClick={() => setAdminSubTab("suppliers")} className={`p-3 text-left font-bold ${adminSubTab === "suppliers" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚚 Suppliers</button>}
+                {canTab("grnHistory") && <button onClick={() => setAdminSubTab("grnHistory")} className={`p-3 text-left font-bold ${adminSubTab === "grnHistory" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📋 GRN History</button>}
+                {canTab("shiftHistory") && <button onClick={() => setAdminSubTab("shiftHistory")} className={`p-3 text-left font-bold ${adminSubTab === "shiftHistory" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🧾 Shift History</button>}
+                {canTab("outsideShift") && <button onClick={() => setAdminSubTab("outsideShift")} className={`p-3 text-left font-bold ${adminSubTab === "outsideShift" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🚨 Transactions Outside Shift</button>}
+                {canTab("reorder") && <button onClick={() => setAdminSubTab("reorder")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "reorder" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
                   <span>🔔 Low-Stock Alerts</span>
                   {lowStockProducts.length > 0 && (
                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black ${adminSubTab === "reorder" ? "bg-white/20" : "bg-red-500 text-white animate-pulse"}`}>{lowStockProducts.length}</span>
                   )}
-                </button>
-                <button onClick={() => setAdminSubTab("expiry")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "expiry" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
+                </button>}
+                {canTab("expiry") && <button onClick={() => setAdminSubTab("expiry")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "expiry" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
                   <span>⏳ Expiry Alerts</span>
                   {expiringProducts.length > 0 && (
                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black ${adminSubTab === "expiry" ? "bg-white/20" : "bg-red-500 text-white animate-pulse"}`}>{expiringProducts.length}</span>
                   )}
-                </button>
-                <button onClick={() => setAdminSubTab("unregistered")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "unregistered" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
+                </button>}
+                {canTab("unregistered") && <button onClick={() => setAdminSubTab("unregistered")} className={`p-3 text-left font-bold flex items-center justify-between ${adminSubTab === "unregistered" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>
                   <span>🆕 Unregistered Items</span>
                   {unregisteredItemGroups.length > 0 && (
                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-black ${adminSubTab === "unregistered" ? "bg-white/20" : "bg-amber-500 text-white animate-pulse"}`}>{unregisteredItemGroups.length}</span>
                   )}
-                </button>
-                <button onClick={() => setAdminSubTab("returns")} className={`p-3 text-left font-bold ${adminSubTab === "returns" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🔄 Return/Exchange History</button>
-                <button onClick={() => setAdminSubTab("sales")} className={`p-3 text-left font-bold ${adminSubTab === "sales" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📊 Sales Reports</button>
-                <button onClick={() => setAdminSubTab("staff")} className={`p-3 text-left font-bold ${adminSubTab === "staff" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👤 User Accounts</button>
+                </button>}
+                {canTab("returns") && <button onClick={() => setAdminSubTab("returns")} className={`p-3 text-left font-bold ${adminSubTab === "returns" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🔄 Return/Exchange History</button>}
+                {canTab("sales") && <button onClick={() => setAdminSubTab("sales")} className={`p-3 text-left font-bold ${adminSubTab === "sales" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>📊 Sales Reports</button>}
+                {canTab("staff") && <button onClick={() => setAdminSubTab("staff")} className={`p-3 text-left font-bold ${adminSubTab === "staff" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>👤 User Accounts</button>}
+                {canTab("audit") && <button onClick={() => setAdminSubTab("audit")} className={`p-3 text-left font-bold ${adminSubTab === "audit" ? "bg-blue-600 text-white" : "hover:bg-slate-700"}`}>🧾 Audit Log</button>}
               </div>
 
               {/* Sub Tab Content Panel */}
@@ -6009,7 +6144,7 @@ useEffect(() => {
                                 ) : (
                                   <>
                                     <button onClick={() => { const ref = sale.invoiceNo || sale._id; setReturnInvoiceSearch(ref); setActiveTab("returns"); handleSearchInvoiceForReturn(null, ref); }} className="bg-amber-100 hover:bg-amber-600 text-amber-700 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all mr-1">🔄 Return</button>
-                                    <button onClick={() => handleVoidSale(sale._id)} className="bg-red-100 hover:bg-red-600 text-red-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all">VOID ✕</button>
+                                    {can("void_bill") && <button onClick={() => handleVoidSale(sale._id)} className="bg-red-100 hover:bg-red-600 text-red-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold transition-all">VOID ✕</button>}
                                   </>
                                 )}
                               </td>
@@ -6022,6 +6157,46 @@ useEffect(() => {
                 )}
 
                 {/* 🆕 ADMIN: Cashier/Staff Account Management - create accounts without needing Postman/curl */}
+                {adminSubTab === "audit" && user.role === "admin" && (
+                  <div className="bg-white rounded-xl border shadow-xs overflow-hidden">
+                    <div className="p-4 border-b bg-gray-50 flex flex-wrap items-center gap-2">
+                      <h3 className="text-xs font-black uppercase text-slate-800 mr-2">🧾 Audit Log</h3>
+                      <select value={auditFilter.category} onChange={(e) => setAuditFilter({ ...auditFilter, category: e.target.value })} className="p-1.5 border rounded text-xs bg-white">
+                        <option value="">All categories</option>
+                        {["sales", "stock", "suppliers", "customers", "users", "security", "promotions", "shifts"].map((c) => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                      <select value={auditFilter.severity} onChange={(e) => setAuditFilter({ ...auditFilter, severity: e.target.value })} className="p-1.5 border rounded text-xs bg-white">
+                        <option value="">All severities</option>
+                        <option value="critical">Critical</option>
+                        <option value="warning">Warning</option>
+                        <option value="info">Info</option>
+                      </select>
+                      <input value={auditFilter.q} onChange={(e) => setAuditFilter({ ...auditFilter, q: e.target.value })} onKeyDown={(e) => e.key === "Enter" && fetchAuditLogs(true)} placeholder="Search user / text..." className="p-1.5 border rounded text-xs bg-white flex-1 min-w-32" />
+                      <button onClick={() => fetchAuditLogs(true)} className="bg-blue-600 text-white px-3 py-1.5 rounded text-xs font-bold">Search</button>
+                    </div>
+                    {auditLogs.length === 0 ? (
+                      <div className="p-6 text-center text-gray-400 text-xs">{isLoadingAudit ? "Loading..." : "No records"}</div>
+                    ) : (
+                      <div className="divide-y divide-gray-100">
+                        {auditLogs.map((l) => (
+                          <div key={l._id} className="px-4 py-2.5 flex items-start gap-3">
+                            <span className={`mt-0.5 text-[9px] px-1.5 py-0.5 rounded-full font-black shrink-0 ${l.severity === "critical" ? "bg-red-100 text-red-700" : l.severity === "warning" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-600"}`}>{(l.severity || "info").toUpperCase()}</span>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs text-slate-800 wrap-break-words">{l.summary}</p>
+                              <p className="text-[10px] text-gray-400">{new Date(l.createdAt).toLocaleString()} · {l.actor}{l.actorRole ? ` (${l.actorRole})` : ""} · {l.category}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {auditNext && (
+                      <div className="p-3 border-t text-center">
+                        <button onClick={() => fetchAuditLogs(false)} disabled={isLoadingAudit} className="bg-gray-100 hover:bg-gray-200 disabled:opacity-50 text-gray-700 px-4 py-1.5 rounded text-xs font-bold">{isLoadingAudit ? "Loading..." : "Load more"}</button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {adminSubTab === "staff" && (
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     {/* Create Account Form */}
@@ -6064,6 +6239,22 @@ useEffect(() => {
                             <option value="admin">Admin</option>
                           </select>
                         </div>
+                        {newUserForm.role === "cashier" && (
+                          <div>
+                            <label className="text-[11px] font-bold text-gray-600 block mb-1">Access level:</label>
+                            <select
+                              value={newUserForm.preset}
+                              onChange={(e) => setNewUserForm({ ...newUserForm, preset: e.target.value })}
+                              className="w-full p-2 border rounded text-xs bg-gray-50 focus:bg-white font-bold"
+                            >
+                              <option value="cashier">Cashier - billing, returns, credit payments</option>
+                              <option value="senior_cashier">Senior Cashier - + customers, stock alerts</option>
+                              <option value="supervisor">Supervisor - + voids, reports, shifts</option>
+                              <option value="manager">Manager - everything except users & audit</option>
+                            </select>
+                            <p className="text-[10px] text-gray-400 mt-1">Fine-tune any account later with the "Access" button.</p>
+                          </div>
+                        )}
                         <button type="submit" disabled={isCreatingUser} className="w-full bg-blue-600 disabled:opacity-50 text-white py-2 rounded text-xs font-bold shadow-md">
                           {isCreatingUser ? "Creating..." : "Create Account"}
                         </button>
@@ -6080,16 +6271,84 @@ useEffect(() => {
                       ) : (
                         <div className="divide-y divide-gray-100">
                           {staffUsers.map((u) => (
-                            <div key={u._id} className="flex justify-between items-center px-4 py-3">
-                              <div>
-                                <p className="text-xs font-bold text-slate-800">
-                                  {u.username}
-                                  {u.username === user.username && <span className="ml-1.5 text-[9px] text-gray-400 font-normal">(you)</span>}
-                                </p>
-                                <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-black ${u.role === "admin" ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700"}`}>{u.role === "admin" ? "ADMIN" : "CASHIER"}</span>
+                            <div key={u._id} className={`px-4 py-3 ${u.active === false ? "bg-gray-50 opacity-70" : ""}`}>
+                              <div className="flex justify-between items-center gap-2">
+                                <div>
+                                  <p className="text-xs font-bold text-slate-800">
+                                    {u.username}
+                                    {u.username === user.username && <span className="ml-1.5 text-[9px] text-gray-400 font-normal">(you)</span>}
+                                  </p>
+                                  <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                                    <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-black ${u.role === "admin" ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700"}`}>{u.role === "admin" ? "ADMIN" : (permCatalog?.presets?.[u.preset || "cashier"]?.label || (u.preset || "cashier")).toString().toUpperCase()}</span>
+                                    {u.role !== "admin" && <span className="text-[9px] text-gray-400">{(u.effectivePermissions || []).length} permission(s)</span>}
+                                    {u.active === false && <span className="text-[9px] px-1.5 py-0.5 rounded-full font-black bg-red-100 text-red-700">DISABLED</span>}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  {u.role !== "admin" && (
+                                    <button onClick={() => openPermEditor(u)} className="bg-blue-100 hover:bg-blue-600 text-blue-700 hover:text-white px-2 py-1 rounded text-[10px] font-bold">🔑 Access</button>
+                                  )}
+                                  {u.username !== user.username && (
+                                    <button onClick={() => handleDeleteUser(u._id, u.username)} className="bg-red-100 hover:bg-red-600 text-red-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold">🗑️ Delete</button>
+                                  )}
+                                </div>
                               </div>
-                              {u.username !== user.username && (
-                                <button onClick={() => handleDeleteUser(u._id, u.username)} className="bg-red-100 hover:bg-red-600 text-red-600 hover:text-white px-2 py-1 rounded text-[10px] font-bold shrink-0">🗑️ Delete</button>
+
+                              {permEditId === u._id && permForm && (
+                                <div className="mt-3 p-3 border rounded-lg bg-slate-50 space-y-3">
+                                  {!permCatalog ? (
+                                    <p className="text-[11px] text-gray-400">Loading...</p>
+                                  ) : (
+                                    <>
+                                      <div className="flex flex-wrap items-center gap-3">
+                                        <label className="text-[11px] font-bold text-gray-600">Start from:
+                                          <select value={permForm.preset} onChange={(e) => applyPermPreset(e.target.value)} className="ml-2 p-1.5 border rounded text-xs bg-white font-bold">
+                                            {Object.entries(permCatalog.presets).map(([k, p]) => <option key={k} value={k}>{p.label}</option>)}
+                                            <option value="custom">Custom</option>
+                                          </select>
+                                        </label>
+                                        <label className="text-[11px] font-bold text-gray-600 flex items-center gap-1.5">
+                                          <input type="checkbox" checked={permForm.active} onChange={(e) => setPermForm({ ...permForm, active: e.target.checked })} />
+                                          Account enabled
+                                        </label>
+                                      </div>
+                                      {permForm.preset !== "custom" && permCatalog.presets[permForm.preset] && (
+                                        <p className="text-[10px] text-gray-500">{permCatalog.presets[permForm.preset].description}</p>
+                                      )}
+                                      <p className="text-[10px] text-gray-500">Billing, hold/resume, adding customers and the cashier's own shift are always allowed.</p>
+                                      {[...new Set(permCatalog.permissions.map((p) => p.group))].map((group) => (
+                                        <div key={group}>
+                                          <p className="text-[10px] font-black uppercase text-slate-500 mb-1">{group}</p>
+                                          <div className="space-y-1">
+                                            {permCatalog.permissions.filter((p) => p.group === group).map((p) => (
+                                              <label key={p.key} className="flex items-start gap-2 p-1.5 rounded hover:bg-white cursor-pointer">
+                                                <input type="checkbox" className="mt-0.5" checked={permForm.permissions.includes(p.key)} onChange={() => togglePerm(p.key)} />
+                                                <span className="flex-1">
+                                                  <span className="text-xs font-bold text-slate-800">{p.label}</span>
+                                                  <span className={`ml-1.5 text-[9px] px-1.5 py-0.5 rounded-full font-black ${p.risk === "high" ? "bg-red-100 text-red-700" : p.risk === "medium" ? "bg-amber-100 text-amber-700" : "bg-green-100 text-green-700"}`}>{p.risk.toUpperCase()}</span>
+                                                  <span className="block text-[10px] text-gray-500">{p.hint}</span>
+                                                  {p.limit === "maxReturnAmount" && permForm.permissions.includes(p.key) && (
+                                                    <span className="flex items-center gap-1.5 mt-1 text-[10px] text-gray-600">
+                                                      Max refund per transaction (Rs.):
+                                                      <input type="number" min="0" placeholder="no limit" value={permForm.maxReturnAmount} onChange={(e) => setPermForm({ ...permForm, maxReturnAmount: e.target.value })} className="w-24 p-1 border rounded text-xs bg-white" />
+                                                    </span>
+                                                  )}
+                                                </span>
+                                              </label>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      ))}
+                                      {(permForm.permissions.includes("manage_products") || permForm.permissions.includes("receive_stock")) && !permForm.permissions.includes("view_cost_price") && (
+                                        <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">Tip: without "See cost prices" this user cannot see or change cost prices (existing costs are kept safe), which makes stock receiving awkward.</p>
+                                      )}
+                                      <div className="flex gap-2">
+                                        <button onClick={() => savePermissions(u)} disabled={isSavingPerm} className="bg-blue-600 disabled:opacity-50 text-white px-3 py-1.5 rounded text-xs font-bold">{isSavingPerm ? "Saving..." : "Save access"}</button>
+                                        <button onClick={() => { setPermEditId(null); setPermForm(null); }} className="bg-gray-200 text-gray-700 px-3 py-1.5 rounded text-xs font-bold">Cancel</button>
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
                               )}
                             </div>
                           ))}
